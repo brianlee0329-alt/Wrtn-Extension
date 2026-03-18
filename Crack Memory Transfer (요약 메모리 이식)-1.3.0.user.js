@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crack Memory Transfer (요약 메모리 이식)
 // @namespace    http://tampermonkey.net/
-// @version      1.3.0
-// @description  요약 메모리 창의 [편집]/[추가] 버튼 옆에 [저장] / [불러오기] 버튼을 추가합니다. 장기·단기 기억 모두 저장하고, 신규 세션의 장기 기억으로 이식합니다.
+// @version      1.3.1
+// @description  요약 메모리 창의 [편집]/[추가] 버튼 옆에 [저장] / [불러오기] 버튼을 추가합니다. 장기·단기 기억 모두 저장하고, 신규 세션의 장기 기억으로 이식합니다. (UI 업데이트 대응)
 // @author       -
 // @match        https://crack.wrtn.ai/*
 // @grant        none
@@ -60,7 +60,6 @@
 
   // ─────────────────────────────────────────────
   //  탭 버튼 헬퍼
-  //  탭 행: div.flex.space-x-2.px-6.pb-5 안의 버튼들
   // ─────────────────────────────────────────────
   function getTabBtn(dialog, label) {
     const tabRow = dialog.querySelector("div.flex.space-x-2.px-6.pb-5");
@@ -69,7 +68,6 @@
       .find(b => b.textContent.trim() === label) || null;
   }
 
-  // 현재 활성 탭 레이블
   function getActiveTabLabel(dialog) {
     const tabRow = dialog.querySelector("div.flex.space-x-2.px-6.pb-5");
     if (!tabRow) return null;
@@ -77,16 +75,14 @@
     return active ? active.textContent.trim() : null;
   }
 
-  // 탭 클릭 후 컨텐츠 전환 대기
   async function clickTabAndWait(dialog, label) {
     const btn = getTabBtn(dialog, label);
     if (!btn) return false;
-    if (btn.classList.contains("bg-primary")) return true; // 이미 활성
+    if (btn.classList.contains("bg-primary")) return true;
 
     btn.click();
-    // 탭 버튼이 bg-primary 로 바뀔 때까지 대기
     await waitUntil(() => btn.classList.contains("bg-primary"), 2000);
-    await sleep(200); // 컨텐츠 렌더링 여유
+    await sleep(200);
     return true;
   }
 
@@ -104,7 +100,7 @@
   //  스크롤 컨테이너
   // ─────────────────────────────────────────────
   function getScrollContainer(dialog) {
-    return dialog.querySelector("div.overflow-y-auto.h-\\[272px\\]");
+    return dialog.querySelector("div.overflow-y-auto");
   }
 
   // ─────────────────────────────────────────────
@@ -130,7 +126,7 @@
   }
 
   // ─────────────────────────────────────────────
-  //  지연 로드 해소 (20개 단위 스크롤 로딩)
+  //  지연 로드 해소
   // ─────────────────────────────────────────────
   async function ensureAllLoaded(dialog, setBtnText) {
     const total = getTotalCount(dialog);
@@ -161,7 +157,7 @@
   }
 
   // ─────────────────────────────────────────────
-  //  아코디언 항목 내용 읽기 (닫혀 있으면 열기)
+  //  아코디언 항목 내용 읽기
   // ─────────────────────────────────────────────
   async function readAccordionContent(titleBtn) {
     const wasOpen = titleBtn.getAttribute("aria-expanded") === "true";
@@ -207,11 +203,10 @@
     for (let i = 0; i < accordionItems.length; i++) {
       const { titleBtn } = accordionItems[i];
 
-      let title = "";
-      for (const node of titleBtn.childNodes) {
-        if (node.nodeType === Node.TEXT_NODE) title += node.textContent;
-      }
-      title = title.trim();
+      // [수정된 부분] 변경된 HTML 구조에 맞게 제목 텍스트를 안정적으로 추출합니다.
+      const titleSpan = titleBtn.querySelector("span.truncate") || titleBtn.querySelector(".text-left");
+      let title = titleSpan ? titleSpan.textContent.trim() : titleBtn.textContent.trim();
+
       if (!title) continue;
 
       if (setBtnText) setBtnText(`장기 기억 읽는 중… (${i + 1}/${accordionItems.length})`);
@@ -219,45 +214,37 @@
       items.push({ title, content });
     }
 
-    // 최신순 → reverse → 오래된 것 먼저
     items.reverse();
     return items;
   }
 
   // ─────────────────────────────────────────────
   //  단기 기억 수집
-  //  단기 기억은 기본 오픈 상태이므로 아코디언 여부를 자동 감지
-  //  ① 아코디언(data-radix-collection-item) 구조면 open 상태로 바로 읽기
-  //  ② 아코디언 없이 단순 div 카드 구조면 텍스트 직접 읽기
   // ─────────────────────────────────────────────
   async function collectShortTerm(dialog, setBtnText) {
     const ok = await clickTabAndWait(dialog, "단기 기억");
-    if (!ok) return []; // 단기 기억 탭 없으면 빈 배열
+    if (!ok) return [];
 
     await sleep(300);
 
     const container = getScrollContainer(dialog);
     const items = [];
-
-    // ── 케이스 A: 아코디언 구조 (장기 기억과 동일)
     const accordionItems = getAccordionItems(dialog);
+
     if (accordionItems.length > 0) {
-      // 단기 기억도 지연 로드 가능성 고려
       await ensureAllLoaded(dialog, setBtnText);
       const refreshed = getAccordionItems(dialog);
 
       for (let i = 0; i < refreshed.length; i++) {
         const { titleBtn } = refreshed[i];
 
-        let title = "";
-        for (const node of titleBtn.childNodes) {
-          if (node.nodeType === Node.TEXT_NODE) title += node.textContent;
-        }
-        title = title.trim();
+        // [수정된 부분] 단기 기억 항목에서도 동일하게 새로운 구조에 맞춰 제목을 추출합니다.
+        const titleSpan = titleBtn.querySelector("span.truncate") || titleBtn.querySelector(".text-left");
+        let title = titleSpan ? titleSpan.textContent.trim() : titleBtn.textContent.trim();
+
         if (!title) continue;
 
         if (setBtnText) setBtnText(`단기 기억 읽는 중… (${i + 1}/${refreshed.length})`);
-        // 단기 기억은 기본 오픈이므로 이미 열려 있을 가능성 높음 → readAccordionContent가 처리
         const content = await readAccordionContent(titleBtn);
         items.push({ title, content });
       }
@@ -266,13 +253,8 @@
       return items;
     }
 
-    // ── 케이스 B: 단순 카드 구조 (아코디언 없음)
-    //    예상 패턴: div.border-b > [제목 span/p] + [내용 div/p]
     if (container) {
-      // 제목+내용 쌍을 가진 카드들 탐색
-      // border-b 로 구분된 각 행
       const cards = container.querySelectorAll("div.border-b, div[class*='border-b']");
-
       for (let i = 0; i < cards.length; i++) {
         const card = cards[i];
         const allText = card.innerText || card.textContent || "";
@@ -287,12 +269,10 @@
         if (setBtnText) setBtnText(`단기 기억 읽는 중… (${i + 1}/${cards.length})`);
       }
 
-      // 카드 구조도 없을 경우: 컨테이너 전체 텍스트를 단일 항목으로
       if (items.length === 0 && container.textContent.trim()) {
         items.push({ title: "단기 기억", content: container.textContent.trim() });
       }
 
-      // 최신순 → reverse → 오래된 것 먼저
       items.reverse();
     }
 
@@ -309,13 +289,9 @@
 
     set("읽는 중…");
 
-    // ① 장기 기억
     const longTerm  = await collectLongTerm(dialog, set);
-
-    // ② 단기 기억 (탭이 있을 경우)
     const shortTerm = await collectShortTerm(dialog, set);
 
-    // ③ 원래 탭(장기 기억)으로 복귀
     await clickTabAndWait(dialog, "장기 기억");
 
     const total = longTerm.length + shortTerm.length;
@@ -345,7 +321,6 @@
 
   // ─────────────────────────────────────────────
   //  불러오기
-  //  장기 기억 + 단기 기억 항목 모두 → 장기 기억 탭에서 [추가]로 삽입
   // ─────────────────────────────────────────────
   async function loadMemories(dialog) {
     const raw = localStorage.getItem(STORAGE_KEY);
@@ -355,7 +330,6 @@
     try { data = JSON.parse(raw); }
     catch (e) { toast("저장 데이터 파싱 오류: " + e.message, "error"); return; }
 
-    // 이전 버전 호환 (items 키 사용 시)
     const longTerm  = data.longTerm  || data.items || [];
     const shortTerm = data.shortTerm || [];
     const allItems  = [...longTerm, ...shortTerm];
@@ -379,7 +353,6 @@
       `계속하시겠습니까?`
     )) return;
 
-    // 장기 기억 탭 활성화
     await clickTabAndWait(dialog, "장기 기억");
 
     const footerRow = getFooterRow(dialog);
@@ -477,7 +450,7 @@
   }
 
   // ─────────────────────────────────────────────
-  //  버튼 생성
+  //  버튼 생성 및 토스트 알림
   // ─────────────────────────────────────────────
   function createBtn(id, label, accentColor) {
     const btn = document.createElement("button");
@@ -500,9 +473,6 @@
     return btn;
   }
 
-  // ─────────────────────────────────────────────
-  //  토스트
-  // ─────────────────────────────────────────────
   function toast(msg, type = "info") {
     const palette = { success:"#16a34a", warn:"#d97706", error:"#dc2626", info:"#2563eb" };
     const el = document.createElement("div");
@@ -521,7 +491,7 @@
   }
 
   // ─────────────────────────────────────────────
-  //  버튼 주입
+  //  버튼 주입 로직
   // ─────────────────────────────────────────────
   function injectButtons(dialog) {
     const footerRow = getFooterRow(dialog);
@@ -545,7 +515,6 @@
       dlg ? loadMemories(dlg) : toast("요약 메모리 창을 찾을 수 없습니다.", "error");
     });
 
-    // 순서: [저장] [불러오기] [편집] [추가]
     const editBtn = Array.from(footerRow.querySelectorAll("button"))
       .find(b => b.textContent.trim() === "편집");
     footerRow.insertBefore(loadBtn, editBtn);
@@ -553,7 +522,7 @@
   }
 
   // ─────────────────────────────────────────────
-  //  MutationObserver
+  //  DOM 변경 감지
   // ─────────────────────────────────────────────
   new MutationObserver(() => {
     const d = getMemoryDialog();
