@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crack HTML Renderer
 // @namespace    http://tampermonkey.net/
-// @version      1.5.0
-// @description  Crack(crack.wrtn.ai) 채팅 메시지 내 HTML 코드를 감지, 직접 DOM에 렌더링합니다.
+// @version      1.6.0
+// @description  Crack(crack.wrtn.ai) 채팅 메시지 내 HTML 코드를 감지, 직접 DOM에 렌더링합니다. (보안 패치: on* 속성/위험 태그/javascript: URL 차단 / 인라인 style !important 강제 적용)
 // @author       -
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
@@ -903,7 +903,11 @@
 
     const label = document.createElement('div');
     label.className = 'crk-yt-label';
-    label.innerHTML = `<span>▶</span><span>YouTube — ${videoId}</span>`;
+    const labelIcon = document.createElement('span');
+    labelIcon.textContent = '▶';
+    const labelText = document.createElement('span');
+    labelText.textContent = `YouTube — ${videoId}`;   // textContent → XSS 불가
+    label.append(labelIcon, labelText);
 
     const toggle = document.createElement('div');
     toggle.className = 'crk-yt-toggle';
@@ -951,7 +955,36 @@
     const frag = template.content;
 
     frag.querySelectorAll('[node]').forEach(el => el.removeAttribute('node'));
-    frag.querySelectorAll('script, style, link[rel="stylesheet"]').forEach(el => el.remove());
+    frag.querySelectorAll(
+      'script, style, link, iframe, frame, frameset, object, embed, base, meta, form'
+    ).forEach(el => el.remove());
+
+    // ① on* 이벤트 핸들러 속성 전체 제거 + javascript: URL 차단
+    const DANGEROUS_ATTRS = ['href', 'src', 'action', 'formaction', 'data', 'xlink:href'];
+    frag.querySelectorAll('*').forEach(el => {
+      [...el.attributes].forEach(attr => {
+        if (/^on/i.test(attr.name)) {
+          el.removeAttribute(attr.name);
+        }
+      });
+      DANGEROUS_ATTRS.forEach(a => {
+        const val = el.getAttribute(a);
+        if (val && /^\s*javascript:/i.test(val)) el.removeAttribute(a);
+      });
+    });
+
+    // 인라인 style 속성에 !important 강제 부여
+    // — 플랫폼 CSS의 !important 초기화 규칙을 인라인 style이 이기려면 필요
+    frag.querySelectorAll('[style]').forEach(el => {
+      const raw = el.getAttribute('style') || '';
+      const enforced = raw
+        .split(';')
+        .map(s => s.trim())
+        .filter(Boolean)
+        .map(s => (/!important\s*$/.test(s) ? s : s + ' !important'))
+        .join('; ');
+      el.setAttribute('style', enforced);
+    });
 
     return frag;
   }
