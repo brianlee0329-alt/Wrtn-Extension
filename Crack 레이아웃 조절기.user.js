@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crack 레이아웃 조절기 (Layout Controller)
 // @namespace    https://github.com/local/crack-layout
-// @version      1.5.1
-// @description  채팅창 너비 조절 + 컴팩트 모드(그룹 BFC float, 코드블럭/인용 독립) + 이미지 높이 제한 440px
+// @version      1.5.2
+// @description  채팅창 너비 조절 + 컴팩트 모드
 // @author       Tyme
 // @match        https://crack.wrtn.ai/stories/*/episodes/*
 // @grant        GM_setValue
@@ -123,6 +123,19 @@
                 display: block !important;
             }
 
+            /* ── 컴팩트 모드: 이미지-텍스트 상단 정렬 보정 ─────────────────────────
+               크랙은 이미지 <span>에 pt-5(padding-top:1.25rem=20px)를 적용한다.
+               float box 내에서 실제 이미지 픽셀이 20px 아래서 시작하므로,
+               우측 텍스트 첫 문단(y=0 시작)보다 이미지가 낮아 보이는 문제 해소.
+               → .ck-group-img 안의 pt-5 패딩 제거 + 첫 텍스트 단락 margin-top 제거
+            ────────────────────────────────────────────────────────────────────── */
+            .ck-group-img .pt-5 {
+                padding-top: 0 !important;
+            }
+            .ck-group-img + p {
+                margin-top: 0 !important;
+            }
+
             /* ── 패널 슬라이더 공통 ── */
             #ck-panel input[type=range] {
                 -webkit-appearance: none;
@@ -177,7 +190,103 @@
     // =========================================================================
 
     function isImgParagraph(el) {
-        return el.tagName === 'P' && !!el.querySelector('img.rounded-lg');
+        if (el.tagName !== 'P') return false;
+        if (!el.querySelector('img.rounded-lg')) return false;
+        // 이미지 컨테이너를 제거한 뒤 잔여 텍스트가 없어야 순수 이미지 단락으로 판정.
+        // 텍스트가 남으면 혼합 단락 → isImgParagraph = false (splitMixedParagraph로 처리)
+        const clone = el.cloneNode(true);
+        let container = clone.querySelector('img.rounded-lg');
+        while (container.parentElement && container.parentElement !== clone) {
+            container = container.parentElement;
+        }
+        container.remove();
+        return clone.textContent.trim().length === 0;
+    }
+
+    /**
+     * 이미지와 텍스트가 동일 <p> 안에 혼재하는 "혼합 단락" 판별.
+     */
+    function isMixedImgParagraph(el) {
+        if (el.tagName !== 'P') return false;
+        if (!el.querySelector('img.rounded-lg')) return false;
+        const clone = el.cloneNode(true);
+        let container = clone.querySelector('img.rounded-lg');
+        while (container.parentElement && container.parentElement !== clone) {
+            container = container.parentElement;
+        }
+        container.remove();
+        return clone.textContent.trim().length > 0;
+    }
+
+    /**
+     * 혼합 단락을 [before-p?, img-p, after-p?] 로 분리하여 반환.
+     *
+     * 변환 전:
+     *   <p>
+     *     <em>텍스트A</em>
+     *     <span class="pt-5 block"><img class="rounded-lg"></span>
+     *     <strong>GM|</strong> 텍스트B
+     *   </p>
+     *
+     * 변환 후:
+     *   <p><em>텍스트A</em></p>                     ← before (standalone)
+     *   <p><span class="block"><img ...></span></p>  ← img (pt-5 제거됨)
+     *   <p><strong>GM|</strong> 텍스트B</p>          ← after (textEls로 wrap)
+     *
+     * pt-5 제거: float box 안에서 이미지가 padding 없이 최상단부터 시작하도록 보정.
+     */
+    function splitMixedParagraph(p) {
+        const img = p.querySelector('img.rounded-lg');
+        if (!img) return [p];
+
+        // img의 직계 부모를 p까지 타고 올라가 p의 직접 자식 컨테이너를 찾는다
+        let imgContainer = img;
+        while (imgContainer.parentElement && imgContainer.parentElement !== p) {
+            imgContainer = imgContainer.parentElement;
+        }
+
+        const beforeNodes = [];
+        const afterNodes  = [];
+        let found = false;
+
+        for (const child of Array.from(p.childNodes)) {
+            if (child === imgContainer) {
+                found = true;
+                continue;
+            }
+            if (!found) {
+                // 이미지 앞 공백 전용 텍스트 노드는 생략
+                if (child.nodeType === Node.TEXT_NODE && child.textContent.trim() === '') continue;
+                beforeNodes.push(child.cloneNode(true));
+            } else {
+                // 이미지 뒤 선행 공백 전용 텍스트 노드는 생략
+                if (!afterNodes.length && child.nodeType === Node.TEXT_NODE && child.textContent.trim() === '') continue;
+                afterNodes.push(child.cloneNode(true));
+            }
+        }
+
+        const result = [];
+
+        if (beforeNodes.length) {
+            const bp = document.createElement('p');
+            beforeNodes.forEach(n => bp.appendChild(n));
+            result.push(bp);
+        }
+
+        // 이미지 단락: pt-5 제거로 float 상단 정렬 보정
+        const imgP = document.createElement('p');
+        const imgClone = imgContainer.cloneNode(true);
+        imgClone.classList.remove('pt-5');   // padding-top 제거 (px 보정은 CSS에서 처리)
+        imgP.appendChild(imgClone);
+        result.push(imgP);
+
+        if (afterNodes.length) {
+            const ap = document.createElement('p');
+            afterNodes.forEach(n => ap.appendChild(n));
+            result.push(ap);
+        }
+
+        return result;
     }
 
     /**
@@ -198,6 +307,19 @@
 
         const children = Array.from(md.children);
 
+        // ── 전처리: 혼합 단락(이미지+텍스트 공존 <p>)을 분리 ──────────────────
+        // isImgParagraph 가 false를 반환하는 혼합 단락을 [before, img, after] 로
+        // 쪼개어 일반 자식 배열로 편입한 뒤 기존 그룹화 로직을 그대로 적용.
+        const expandedChildren = [];
+        for (const child of children) {
+            if (isMixedImgParagraph(child)) {
+                expandedChildren.push(...splitMixedParagraph(child));
+            } else {
+                expandedChildren.push(child);
+            }
+        }
+        // ──────────────────────────────────────────────────────────────────────
+
         // 출력 목록: { type: 'group'|'standalone', ... }
         // group   : { imgEl, textEls[], breakerEls[] }
         //   - textEls   : 이미지 옆에서 wrap될 일반 <p> 단락들
@@ -207,15 +329,15 @@
         let i = 0;
 
         // 첫 이미지 이전 요소 → standalone
-        while (i < children.length && !isImgParagraph(children[i])) {
-            output.push({ type: 'standalone', el: children[i] });
+        while (i < expandedChildren.length && !isImgParagraph(expandedChildren[i])) {
+            output.push({ type: 'standalone', el: expandedChildren[i] });
             i++;
         }
 
         // 이미지 단위로 그룹 생성
-        while (i < children.length) {
-            if (isImgParagraph(children[i])) {
-                const imgEl      = children[i];
+        while (i < expandedChildren.length) {
+            if (isImgParagraph(expandedChildren[i])) {
+                const imgEl      = expandedChildren[i];
                 const textEls    = [];   // 이미지 옆 wrap 텍스트
                 const breakerEls = [];   // 그룹 하단 독립 블럭
                 i++;
@@ -225,18 +347,18 @@
                 // · 일반 <p>  → textEls에 추가
                 // ※ breaker 이후에 오는 <p>도 textEls에 계속 추가.
                 //   이렇게 해야 "텍스트와 텍스트 사이에 코드블럭 삽입" 현상이 사라짐.
-                while (i < children.length && !isImgParagraph(children[i])) {
-                    if (isBreaker(children[i])) {
-                        breakerEls.push(children[i]);
+                while (i < expandedChildren.length && !isImgParagraph(expandedChildren[i])) {
+                    if (isBreaker(expandedChildren[i])) {
+                        breakerEls.push(expandedChildren[i]);
                     } else {
-                        textEls.push(children[i]);
+                        textEls.push(expandedChildren[i]);
                     }
                     i++;
                 }
 
                 output.push({ type: 'group', imgEl, textEls, breakerEls });
             } else {
-                output.push({ type: 'standalone', el: children[i] });
+                output.push({ type: 'standalone', el: expandedChildren[i] });
                 i++;
             }
         }
@@ -252,6 +374,9 @@
                 const wrapper = document.createElement('div');
                 wrapper.className = 'ck-group';
                 item.imgEl.classList.add('ck-group-img');
+                // 순수 이미지 단락의 pt-5도 제거 (상단 정렬 보정)
+                const pt5 = item.imgEl.querySelector('.pt-5');
+                if (pt5) pt5.classList.remove('pt-5');
                 wrapper.appendChild(item.imgEl);
                 item.textEls.forEach(el => wrapper.appendChild(el));
                 md.appendChild(wrapper);
