@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crack 레이아웃 조절기 (Layout Controller)
 // @namespace    https://github.com/local/crack-layout
-// @version      1.5.2
+// @version      1.5.3
 // @description  채팅창 너비 조절 + 컴팩트 모드
 // @author       Tyme
 // @match        https://crack.wrtn.ai/stories/*/episodes/*
@@ -552,7 +552,7 @@
     function init() {
         injectCSS();
         buildUI();
-        if (CFG.compactMode) setTimeout(applyCompactAll, 800);
+        if (CFG.compactMode) setTimeout(applyCompactAll, 1000);
     }
 
     if (document.readyState === 'loading') {
@@ -581,7 +581,7 @@
                     )
                 )
             );
-            if (hasNew) { clearTimeout(mdTimer); mdTimer = setTimeout(applyCompactAll, 200); }
+            if (hasNew) { clearTimeout(mdTimer); mdTimer = setTimeout(applyCompactAll, 600); }
         }
     }).observe(document.body, { childList: true, subtree: true });
 
