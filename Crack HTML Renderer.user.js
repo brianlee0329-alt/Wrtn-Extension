@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crack HTML Renderer
 // @namespace    http://tampermonkey.net/
-// @version      1.6.0
-// @description  Crack(crack.wrtn.ai) 채팅 메시지 내 HTML 코드를 감지, 직접 DOM에 렌더링합니다. (보안 패치: on* 속성/위험 태그/javascript: URL 차단 / 인라인 style !important 강제 적용)
+// @version      1.6.1
+// @description  Crack(crack.wrtn.ai) 채팅 메시지 내 HTML 코드를 감지, 직접 DOM에 렌더링합니다.
 // @author       -
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
@@ -508,7 +508,7 @@
     timers.set(mdEl, setTimeout(() => {
       timers.delete(mdEl);
       processMarkdownEl(mdEl);
-    }, 600));
+    }, 400));
   }
 
   // ============================================================
@@ -1012,7 +1012,7 @@
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', processExisting);
   } else {
-    setTimeout(processExisting, 800);
+    setTimeout(processExisting, 400);
   }
 
   let lastPath = location.pathname;
