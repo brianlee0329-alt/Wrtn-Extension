@@ -1,10 +1,10 @@
 // ==UserScript==
-// @name         Crack 레이아웃 조절기 (Layout Controller)
+// @name         Crack 레이아웃 조절기
 // @namespace    https://github.com/local/crack-layout
-// @version      1.5.3
+// @version      1.5.4
 // @description  채팅창 너비 조절 + 컴팩트 모드
 // @author       Tyme
-// @match        https://crack.wrtn.ai/stories/*/episodes/*
+// @match        https://crack.wrtn.ai/stories/*
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @run-at       document-idle
@@ -282,8 +282,24 @@
 
         if (afterNodes.length) {
             const ap = document.createElement('p');
-            afterNodes.forEach(n => ap.appendChild(n));
-            result.push(ap);
+            afterNodes.forEach((n, i) => {
+                // ── 첫 번째 텍스트 노드의 선행 \n 제거 ─────────────────────────────
+                // 크랙 wrtn-markdown은 white-space:pre-wrap 이므로 텍스트 노드에
+                // 남아 있는 선행 \n 이 실제 빈 줄로 렌더된다.
+                // 평문 텍스트는 이미지 span과 같은 노드 내에서 "\n텍스트" 형태의
+                // 단일 텍스트 노드로 들어오기 때문에, trim() !== '' 조건을 통과해
+                // 선행 \n 이 그대로 afterP 에 포함된다.
+                // (서식 있는 텍스트는 \n 전용 노드와 <strong>/<em> 이 분리 수록되어
+                //  \n 전용 노드는 위의 "공백 전용 건너뜀" 로직에서 이미 걸러진다.)
+                if (i === 0 && n.nodeType === Node.TEXT_NODE) {
+                    const cleaned = n.textContent.replace(/^\n+/, '');
+                    if (cleaned.length === 0) return; // 내용 없으면 노드 자체 생략
+                    ap.appendChild(document.createTextNode(cleaned));
+                } else {
+                    ap.appendChild(n);
+                }
+            });
+            if (ap.childNodes.length) result.push(ap);
         }
 
         return result;
@@ -343,12 +359,18 @@
                 i++;
 
                 // 다음 이미지 단락 전까지 수집
+                // · <hr>      → breakerEls에 추가 후 즉시 루프 종료 (그룹 구분자)
+                //               <hr> 이후 요소는 다음 그룹 or standalone으로 처리됨
                 // · isBreaker → breakerEls 큐에 적재 (하단에 몰아 배치)
                 // · 일반 <p>  → textEls에 추가
                 // ※ breaker 이후에 오는 <p>도 textEls에 계속 추가.
                 //   이렇게 해야 "텍스트와 텍스트 사이에 코드블럭 삽입" 현상이 사라짐.
                 while (i < expandedChildren.length && !isImgParagraph(expandedChildren[i])) {
-                    if (isBreaker(expandedChildren[i])) {
+                    if (expandedChildren[i].tagName === 'HR') {
+                        breakerEls.push(expandedChildren[i]);
+                        i++;
+                        break; // <hr>을 그룹 종료 구분자로 처리
+                    } else if (isBreaker(expandedChildren[i])) {
                         breakerEls.push(expandedChildren[i]);
                     } else {
                         textEls.push(expandedChildren[i]);
