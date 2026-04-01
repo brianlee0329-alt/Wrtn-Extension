@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         IGX Radiosonde Viewer
 // @namespace    igx-crack-rs-unified
-// @version      1.1.0
+// @version      1.2.0
 // @description  라디오존데 상태 표시 + 점수 기반 IGX 알림 기능
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
@@ -28,7 +28,7 @@
   const API_BASE = 'https://rs.igx.kr/api/simple/';
   const POLL_MS  = 60_000;
 
-  // ── GM 스토리지 키 (IGX Alert와 동일한 키 사용 → 설정 호환)
+  // ── GM 스토리지 키
   const KEY = {
     watched:    'rsalert_watched',
     threshold:  'rsalert_threshold',
@@ -83,7 +83,7 @@
     if (scoreNum >= 70) return '#1d9e5c';
     if (scoreNum >= 50) return '#c8a000';
     if (scoreNum <= 40) return '#e84040';
-    return null; // 41–49: 지정 없음 → 기본 텍스트 색
+    return null;
   }
 
   // ────────────────────────────────────────────────────────────
@@ -123,7 +123,6 @@
     const wrap = document.getElementById('crs-toast-wrap');
     if (!wrap || !btnBarEl) return;
     const rect = btnBarEl.getBoundingClientRect();
-    // 버튼 바로 아래, 버튼 오른쪽 끝에 우측 정렬
     wrap.style.top   = (rect.bottom + 6) + 'px';
     wrap.style.right = (window.innerWidth - rect.right) + 'px';
   }
@@ -169,10 +168,9 @@
   }
 
   // ────────────────────────────────────────────────────────────
-  //  알림 엣지 검출 (IGX Alert 핵심 로직 — API 점수 기반으로 이식)
+  //  알림 엣지 검출
   // ────────────────────────────────────────────────────────────
   function checkAlerts(freshScores) {
-    // freshScores: Map<slug, scoreNum(NaN이면 데이터 없음)>
     const watched   = loadJSON(KEY.watched,   {});
     const threshold = Number(load(KEY.threshold, 70));
     const prev      = loadJSON(KEY.prevScores, {});
@@ -190,13 +188,10 @@
       const wasBelow = prevScore === null || prevScore < threshold;
       const wasAbove = prevScore !== null && prevScore >= threshold;
 
-      // 상승 엣지: 임계값 미만 → 이상 (상태 회복)
       if (wasBelow && curScore >= threshold) hits.push({ m, score: curScore });
-      // 하락 엣지: 임계값 이상 → 미만 (기준치 이탈)
       if (wasAbove && curScore < threshold)  drops.push({ m, score: curScore });
     }
 
-    // 이번 사이클 점수 저장 (다음 체크의 prev)
     saveJSON(KEY.prevScores, { ...prev, ...saveMap });
 
     if (hits.length)  setTimeout(() => hits.forEach(h  => fireAlert(h.m.label, h.score, false)), 900);
@@ -227,13 +222,13 @@
   // ────────────────────────────────────────────────────────────
   //  UI 참조 (buildPanel에서 초기화)
   // ────────────────────────────────────────────────────────────
-  const uiRows     = new Map();  // slug → { row, stateEl, metricEl }
-  let footerTsEl   = null;       // 타임스탬프 span
-  let barChipsEl   = null;
-  let btnBarEl     = null;
-  let panelEl      = null;
-  let panelOpen    = false;
-  let renderWatchedModelList = () => {}; // buildAlertPane에서 실체화
+  const uiRows  = new Map();  // slug → { row, stateEl, metricEl }
+  let footerTsEl = null;
+  let barChipsEl = null;
+  let btnBarEl   = null;
+  let panelEl    = null;
+  let panelOpen  = false;
+  let renderWatchedModelList = () => {}; // buildModelSection에서 실체화
 
   // ────────────────────────────────────────────────────────────
   //  갱신 루프: fetch → 상태 UI → 알림 체크
@@ -250,7 +245,7 @@
     for (let i = 0; i < MODELS.length; i++) {
       const m  = MODELS[i];
       const ui = uiRows.get(m.slug);
-      if (!ui) continue; // 패널 미빌드 시 스킵
+      if (!ui) continue;
 
       const res = results[i];
       if (res.status !== 'fulfilled' || !res.value?.success) {
@@ -290,7 +285,7 @@
     checkAlerts(freshScores);
   }
 
-  // ── 바 버튼에 알림 ON 표시 갱신
+  // ── 바 버튼 알림 ON 표시 갱신
   function updateBarBtn() {
     if (!btnBarEl) return;
     const watched = loadJSON(KEY.watched, {});
@@ -311,7 +306,6 @@
       const score  = d.score   ?? '—';
       const sc     = scoreColor(d.scoreNum);
       const sStyle = sc ? ` style="color:${sc}"` : '';
-      // dot 없이: 풀네임 + 점수만, 구분자는 CSS border-left로 처리
       return `<span class="crs-bc crs-bc-${status}"><span class="crs-bname">${m.label}</span><span class="crs-bscore"${sStyle}>${score}</span></span>`;
     }).join('');
   }
@@ -363,7 +357,7 @@
       #crs-refresh-btn.spinning { animation: crs-spin 0.6s linear; }
       @keyframes crs-spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 
-      /* ── 바 칩: 구분자 방식 단일 블럭 ── */
+      /* ── 바 칩 ── */
       .crs-bc {
         display: inline-flex; align-items: center; gap: 6px;
         padding: 0 12px; font-size: 13px;
@@ -373,14 +367,11 @@
       body:not([data-theme="dark"]) .crs-bc { border-left-color: rgba(0,0,0,0.12); }
       .crs-bname { font-weight: 600; opacity: .80; }
       .crs-bscore { font-weight: 800; }
-      .crs-bc-active   .crs-bscore { /* scoreColor()로 인라인 처리 */ }
-      .crs-bc-degraded .crs-bscore { /* scoreColor()로 인라인 처리 */ }
-      .crs-bc-impacted .crs-bscore { /* scoreColor()로 인라인 처리 */ }
 
       /* ═══ 드롭다운 패널 ═══ */
       #crs-panel {
         position: fixed; top: 60px; z-index: 99999;
-        width: 300px; max-height: calc(100vh - 60px); overflow-y: auto;
+        width: 320px; max-height: calc(100vh - 60px); overflow-y: auto;
         background: rgba(16,16,24,0.98);
         border: 1px solid rgba(255,255,255,0.12); border-top: none;
         border-radius: 0 0 12px 12px;
@@ -401,41 +392,34 @@
         box-shadow: 0 14px 42px rgba(0,0,0,0.18);
       }
 
-      /* ── 탭 바 ── */
-      #crs-tabs {
-        display: flex; border-bottom: 1px solid rgba(255,255,255,0.08);
-        position: sticky; top: 0; background: rgba(16,16,24,0.98);
-        backdrop-filter: blur(16px); z-index: 1;
-      }
-      body:not([data-theme="dark"]) #crs-tabs {
-        border-bottom-color: rgba(0,0,0,0.08);
-        background: rgba(245,245,250,0.98);
-      }
-      .crs-tab {
-        flex: 1; padding: 9px 0; font-size: 12px; font-weight: 600;
-        text-align: center; cursor: pointer;
-        color: rgba(255,255,255,0.35);
-        border-bottom: 2px solid transparent;
-        border-top: none; border-left: none; border-right: none;
-        background: transparent;
-        transition: color 0.15s, border-color 0.15s;
-        letter-spacing: 0.1px;
-      }
-      body:not([data-theme="dark"]) .crs-tab { color: rgba(0,0,0,0.32); }
-      .crs-tab.active { color: rgba(100,220,160,1); border-bottom-color: rgba(100,220,160,0.80); }
-      body:not([data-theme="dark"]) .crs-tab.active { color: rgba(18,155,75,1); border-bottom-color: rgba(18,155,75,0.80); }
-
-      /* ── 탭 콘텐츠 ── */
-      .crs-tab-pane { display: none; padding: 10px 12px 16px; }
-      .crs-tab-pane.active { display: block; }
-
-      /* 패널 상단 버튼 행 */
+      /* ── 패널 액션 행 (sticky) ── */
       #crs-panel-actions {
-        display: flex; gap: 6px; justify-content: flex-end;
-        padding: 8px 12px 0; position: sticky; top: 0; z-index: 2;
-        pointer-events: none;
+        display: flex; align-items: center; justify-content: space-between;
+        padding: 8px 12px;
+        position: sticky; top: 0; z-index: 2;
+        background: rgba(16,16,24,0.98);
+        border-bottom: 1px solid rgba(255,255,255,0.07);
+        backdrop-filter: blur(16px);
       }
-      #crs-panel-actions > * { pointer-events: auto; }
+      body:not([data-theme="dark"]) #crs-panel-actions {
+        background: rgba(245,245,250,0.98);
+        border-bottom-color: rgba(0,0,0,0.07);
+      }
+      #crs-act-left { display: flex; align-items: center; gap: 7px; }
+      #crs-ts-label {
+        font-size: 10.5px; color: rgba(255,255,255,0.42);
+        font-family: monospace;
+      }
+      body:not([data-theme="dark"]) #crs-ts-label { color: rgba(0,0,0,0.38); }
+      .crs-foot-link {
+        font-size: 10px; color: rgba(120,200,255,0.75);
+        text-decoration: none; border-bottom: 1px dotted rgba(120,200,255,0.30);
+      }
+      body:not([data-theme="dark"]) .crs-foot-link {
+        color: rgba(25,110,210,0.75); border-bottom-color: rgba(25,110,210,0.30);
+      }
+
+      /* 패널 상단 버튼 */
       .crs-panel-btn {
         font-size: 11px; padding: 3px 9px; border-radius: 5px;
         border: 1px solid rgba(255,255,255,0.13);
@@ -449,7 +433,17 @@
       .crs-panel-btn:hover { background: rgba(255,255,255,0.10); color: rgba(255,255,255,0.85); }
       body:not([data-theme="dark"]) .crs-panel-btn:hover { background: rgba(0,0,0,0.07); color: rgba(0,0,0,0.80); }
 
-      /* ═══ 상태 탭: 모델 행 ═══ */
+      /* ── 섹션 패딩 컨테이너 ── */
+      .crs-sec-pad { padding: 10px 12px 12px; }
+      .crs-sec-pad + .crs-sec-pad {
+        border-top: 1px solid rgba(255,255,255,0.07);
+        padding-top: 10px;
+      }
+      body:not([data-theme="dark"]) .crs-sec-pad + .crs-sec-pad {
+        border-top-color: rgba(0,0,0,0.07);
+      }
+
+      /* ═══ 상태: 모델 행 ═══ */
       .crs-row { padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.07); }
       body:not([data-theme="dark"]) .crs-row { border-bottom-color: rgba(0,0,0,0.07); }
       .crs-row:last-of-type { border-bottom: none; }
@@ -478,42 +472,23 @@
       body:not([data-theme="dark"]) .crs-s-active   .crs-dot   { background: #1da851; }
       body:not([data-theme="dark"]) .crs-s-active   .crs-stxt  { color: #1da851; }
 
-      /* 푸터 */
-      #crs-status-foot {
-        display: flex; justify-content: space-between; align-items: center;
-        margin-top: 8px; padding-top: 6px;
-        border-top: 1px solid rgba(255,255,255,0.06);
-        font-size: 10px; color: rgba(255,255,255,0.38);
-      }
-      body:not([data-theme="dark"]) #crs-status-foot { border-top-color: rgba(0,0,0,0.06); color: rgba(0,0,0,0.35); }
-      #crs-status-foot a { color: rgba(120,200,255,0.85); text-decoration: none; border-bottom: 1px dotted rgba(120,200,255,0.35); }
-      body:not([data-theme="dark"]) #crs-status-foot a { color: rgba(25,110,210,0.85); border-bottom-color: rgba(25,110,210,0.35); }
-
-      /* 표시 모델 설정 */
-      .crs-set-row {
-        display: flex; align-items: center;
-        padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.05);
-        font-size: 11px; color: rgba(255,255,255,0.70);
-      }
-      body:not([data-theme="dark"]) .crs-set-row { border-bottom-color: rgba(0,0,0,0.05); color: rgba(0,0,0,0.68); }
-      .crs-set-row:last-child { border-bottom: none; }
-      .crs-set-label { display: flex; align-items: center; gap: 6px; cursor: pointer; flex: 1; margin: 0; }
-      .crs-set-chk   { width: 13px; height: 13px; accent-color: #1d9e5c; cursor: pointer; flex-shrink: 0; }
-
-      /* ═══ 알림 탭 (IGX Alert 스타일 이식) ═══ */
+      /* ═══ 알림/모델 공통 ═══ */
       .crs-section { margin-bottom: 14px; }
+      .crs-section:last-child { margin-bottom: 0; }
       .crs-section-label {
         font-size: 10.5px; font-weight: 700;
         color: rgba(255,255,255,0.28); letter-spacing: 0.8px;
         text-transform: uppercase; margin-bottom: 8px;
       }
       body:not([data-theme="dark"]) .crs-section-label { color: rgba(0,0,0,0.28); }
+
       .crs-toggle-row { display: flex; align-items: center; justify-content: space-between; padding: 5px 0; }
       .crs-toggle-text { font-size: 12.5px; color: rgba(255,255,255,0.72); }
       body:not([data-theme="dark"]) .crs-toggle-text { color: rgba(0,0,0,0.68); }
       .crs-toggle-sub { font-size: 10.5px; color: rgba(255,255,255,0.28); margin-top: 1px; }
       body:not([data-theme="dark"]) .crs-toggle-sub { color: rgba(0,0,0,0.28); }
 
+      /* 스위치 */
       .crs-sw { position: relative; width: 36px; height: 20px; flex-shrink: 0; }
       .crs-sw input { opacity: 0; width: 0; height: 0; position: absolute; }
       .crs-sw-track {
@@ -532,6 +507,7 @@
       .crs-sw input:checked + .crs-sw-track { background: rgba(70,195,115,0.50); }
       .crs-sw input:checked + .crs-sw-track::before { transform: translateX(16px); background: rgba(90,230,135,1); }
 
+      /* 볼륨 */
       .crs-vol-row { display: flex; align-items: center; gap: 8px; padding: 4px 0 3px; }
       .crs-vol-icon { font-size: 13px; flex-shrink: 0; width: 18px; text-align: center; color: rgba(255,255,255,0.50); }
       body:not([data-theme="dark"]) .crs-vol-icon { color: rgba(0,0,0,0.42); }
@@ -559,6 +535,7 @@
       body:not([data-theme="dark"]) .crs-test-btn { border-color: rgba(0,0,0,0.12); background: rgba(0,0,0,0.04); color: rgba(0,0,0,0.40); }
       .crs-test-btn:hover { background: rgba(255,255,255,0.11); color: rgba(255,255,255,0.80); }
 
+      /* 임계 점수 */
       .crs-score-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; }
       .crs-score-label { font-size: 12.5px; color: rgba(255,255,255,0.72); flex: 1; }
       body:not([data-theme="dark"]) .crs-score-label { color: rgba(0,0,0,0.68); }
@@ -574,9 +551,10 @@
       .crs-score-unit { font-size: 11px; color: rgba(255,255,255,0.28); }
       body:not([data-theme="dark"]) .crs-score-unit { color: rgba(0,0,0,0.28); }
 
-      .crs-divider { border: none; border-top: 1px solid rgba(255,255,255,0.07); margin: 10px 0 12px; }
+      .crs-divider { border: none; border-top: 1px solid rgba(255,255,255,0.07); margin: 0; }
       body:not([data-theme="dark"]) .crs-divider { border-top-color: rgba(0,0,0,0.07); }
 
+      /* ── 모델 목록 (통합) ── */
       .crs-model-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
       .crs-model-actions { display: flex; gap: 5px; }
       .crs-mini-btn {
@@ -586,7 +564,6 @@
       }
       body:not([data-theme="dark"]) .crs-mini-btn { border-color: rgba(0,0,0,0.12); background: rgba(0,0,0,0.04); color: rgba(0,0,0,0.40); }
       .crs-mini-btn:hover { background: rgba(255,255,255,0.11); color: rgba(255,255,255,0.80); }
-
       .crs-model-list { display: flex; flex-direction: column; gap: 3px; }
       .crs-model-item {
         display: flex; align-items: center; gap: 8px; padding: 5px 6px;
@@ -597,12 +574,13 @@
       .crs-model-item input[type="checkbox"] { width: 13px; height: 13px; accent-color: #1d9e5c; cursor: pointer; flex-shrink: 0; }
       .crs-model-name { flex: 1; font-size: 11.5px; color: rgba(255,255,255,0.75); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
       body:not([data-theme="dark"]) .crs-model-name { color: rgba(0,0,0,0.65); }
-      .crs-model-score { font-size: 11px; font-family: monospace; flex-shrink: 0; }
       .crs-waiting {
         font-size: 9.5px; padding: 1px 5px; border-radius: 4px;
         background: rgba(255,200,60,0.12); border: 1px solid rgba(255,200,60,0.25);
         color: rgba(255,200,80,0.85); flex-shrink: 0;
       }
+
+      /* 알림 권한 */
       .crs-perm-row { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
       .crs-perm-label { font-size: 12px; color: rgba(255,255,255,0.40); flex: 1; }
       body:not([data-theme="dark"]) .crs-perm-label { color: rgba(0,0,0,0.38); }
@@ -640,122 +618,117 @@
   }
 
   // ────────────────────────────────────────────────────────────
-  //  패널 빌드
+  //  스위치 헬퍼
   // ────────────────────────────────────────────────────────────
-  function buildPanel() {
-    panelEl = document.createElement('div');
-    panelEl.id = 'crs-panel';
-
-    // ── 탭 헤더
-    const tabs = document.createElement('div');
-    tabs.id = 'crs-tabs';
-    const tabStatus = document.createElement('button');
-    tabStatus.className = 'crs-tab active'; tabStatus.textContent = '📡 상태';
-    const tabAlert = document.createElement('button');
-    tabAlert.className = 'crs-tab'; tabAlert.textContent = '🔔 알림';
-    tabs.append(tabStatus, tabAlert);
-    panelEl.appendChild(tabs);
-
-    // ── 패널 내 갱신 버튼 (상태 탭 전용 우측 sticky)
-    const actRow = document.createElement('div');
-    actRow.id = 'crs-panel-actions';
-    const refreshBtn2 = document.createElement('button');
-    refreshBtn2.className = 'crs-panel-btn'; refreshBtn2.textContent = '↻ 갱신';
-    refreshBtn2.addEventListener('click', (e) => { e.stopPropagation(); refreshAll(); });
-    actRow.appendChild(refreshBtn2);
-    panelEl.appendChild(actRow);
-
-    // ── 탭 콘텐츠: 상태
-    const paneStatus = document.createElement('div');
-    paneStatus.className = 'crs-tab-pane active';
-
-    for (const m of MODELS) {
-      const row = document.createElement('div');
-      row.className = 'crs-row crs-s-unknown';
-      row.style.display = visibility[m.slug] ? '' : 'none';
-
-      const rtop = document.createElement('div'); rtop.className = 'crs-rtop';
-      const rname = document.createElement('div'); rname.className = 'crs-rname'; rname.textContent = m.label; rname.title = m.label;
-      const rstate = document.createElement('div'); rstate.className = 'crs-rstate';
-      rstate.innerHTML = `<span class="crs-dot"></span><span class="crs-stxt">WAIT</span>`;
-      rtop.append(rname, rstate);
-
-      const metric = document.createElement('div'); metric.className = 'crs-metric'; metric.textContent = '불러오는 중…';
-      row.append(rtop, metric);
-      paneStatus.appendChild(row);
-      uiRows.set(m.slug, { row, stateEl: rstate, metricEl: metric });
-    }
-
-    // 푸터
-    const foot = document.createElement('div'); foot.id = 'crs-status-foot';
-    footerTsEl = document.createElement('span'); footerTsEl.textContent = '—';
-    const footLink = document.createElement('a');
-    footLink.href = 'https://rs.igx.kr/'; footLink.target = '_blank'; footLink.rel = 'noreferrer'; footLink.textContent = 'rs.igx.kr';
-    foot.append(footerTsEl, footLink);
-    paneStatus.appendChild(foot);
-
-    // 표시 모델 설정
-    const settingsDivider = document.createElement('hr'); settingsDivider.className = 'crs-divider';
-    const settingsLabel = document.createElement('div'); settingsLabel.className = 'crs-section-label'; settingsLabel.textContent = '표시 모델';
-    paneStatus.append(settingsDivider, settingsLabel);
-
-    for (const m of MODELS) {
-      const sRow = document.createElement('div'); sRow.className = 'crs-set-row';
-      const sLabel = document.createElement('label'); sLabel.className = 'crs-set-label';
-      const sChk = document.createElement('input');
-      sChk.type = 'checkbox'; sChk.className = 'crs-set-chk'; sChk.checked = visibility[m.slug];
-      sChk.addEventListener('change', (e) => {
-        visibility[m.slug] = e.target.checked;
-        saveVisibility();
-        uiRows.get(m.slug).row.style.display = visibility[m.slug] ? '' : 'none';
-        renderBarChips();
-      });
-      sLabel.append(sChk, document.createTextNode(' ' + m.label));
-      sRow.appendChild(sLabel);
-      paneStatus.appendChild(sRow);
-    }
-
-    panelEl.appendChild(paneStatus);
-
-    // ── 탭 콘텐츠: 알림
-    const paneAlert = document.createElement('div');
-    paneAlert.className = 'crs-tab-pane';
-    buildAlertPane(paneAlert);
-    panelEl.appendChild(paneAlert);
-
-    // ── 탭 전환
-    tabStatus.addEventListener('click', () => {
-      tabStatus.classList.add('active');    tabAlert.classList.remove('active');
-      paneStatus.classList.add('active');   paneAlert.classList.remove('active');
-      actRow.style.display = 'flex';
-    });
-    tabAlert.addEventListener('click', () => {
-      tabAlert.classList.add('active');    tabStatus.classList.remove('active');
-      paneAlert.classList.add('active');   paneStatus.classList.remove('active');
-      actRow.style.display = 'none';
-    });
-
-    document.body.appendChild(panelEl);
-
-    // 외부 클릭 시 닫기
-    document.addEventListener('click', (e) => {
-      if (panelOpen && !panelEl.contains(e.target) && !btnBarEl?.contains(e.target)) {
-        panelOpen = false;
-        panelEl.classList.remove('open');
-      }
-    });
+  function makeSwitch(storageKey, defaultVal, onChange) {
+    const label = document.createElement('label'); label.className = 'crs-sw';
+    const input = document.createElement('input'); input.type = 'checkbox'; input.checked = load(storageKey, defaultVal);
+    input.addEventListener('change', () => { save(storageKey, input.checked); if (onChange) onChange(input.checked); });
+    const track = document.createElement('span'); track.className = 'crs-sw-track';
+    label.append(input, track);
+    return { wrap: label, input };
   }
 
   // ────────────────────────────────────────────────────────────
-  //  알림 탭 콘텐츠 빌드 (IGX Alert UI 이식)
+  //  통합 모델 섹션 빌드 (표시 + 감시 동시 제어)
   // ────────────────────────────────────────────────────────────
-  function buildAlertPane(pane) {
-    // 알림 방식 섹션
+  function buildModelSection(container) {
+    const modelSec = document.createElement('div'); modelSec.className = 'crs-section';
+
+    // 헤더: 레이블 + 전체선택/해제
+    const modelHeader = document.createElement('div'); modelHeader.className = 'crs-model-header';
+    const modelLabel = document.createElement('div');
+    modelLabel.className = 'crs-section-label'; modelLabel.style.marginBottom = '0';
+    modelLabel.textContent = '모델';
+    const modelActions = document.createElement('div'); modelActions.className = 'crs-model-actions';
+
+    function makeMinBtn(text, onClick) {
+      const b = document.createElement('button'); b.className = 'crs-mini-btn'; b.textContent = text;
+      b.addEventListener('click', (e) => { e.stopPropagation(); onClick(); }); return b;
+    }
+
+    const watchedList = document.createElement('div'); watchedList.className = 'crs-model-list';
+
+    // renderWatchedModelList 실체화 (refreshAll에서 호출됨)
+    renderWatchedModelList = function () {
+      watchedList.innerHTML = '';
+      const watched   = loadJSON(KEY.watched, {});
+      const threshold = Number(load(KEY.threshold, 70));
+
+      for (const m of MODELS) {
+        const isOn = !!visibility[m.slug]; // watched와 항상 동기화됨
+
+        const item = document.createElement('label'); item.className = 'crs-model-item';
+        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = isOn;
+        cb.addEventListener('change', (e) => {
+          e.stopPropagation();
+          const v = cb.checked;
+          // 표시 상태 업데이트
+          visibility[m.slug] = v;
+          saveVisibility();
+          const uiRow = uiRows.get(m.slug);
+          if (uiRow) uiRow.row.style.display = v ? '' : 'none';
+          renderBarChips();
+          // 감시 상태 업데이트
+          const w = loadJSON(KEY.watched, {}); w[m.slug] = v;
+          saveJSON(KEY.watched, w); updateBarBtn();
+        });
+        const nameSpan = document.createElement('span'); nameSpan.className = 'crs-model-name'; nameSpan.textContent = m.label;
+        item.append(cb, nameSpan);
+
+        // "대기 중" 배지: 감시 중이고 현재 점수가 임계치 미만
+        if (isOn) {
+          const d = lastData.get(m.slug) || {};
+          const scoreNum = Number.isFinite(d.scoreNum) ? d.scoreNum : NaN;
+          if (Number.isFinite(scoreNum) && scoreNum < threshold) {
+            const badge = document.createElement('span'); badge.className = 'crs-waiting'; badge.textContent = '대기 중';
+            item.appendChild(badge);
+          }
+        }
+        watchedList.appendChild(item);
+      }
+    };
+    renderWatchedModelList();
+
+    // 전체선택/해제
+    modelActions.appendChild(makeMinBtn('전체 선택', () => {
+      const w = {};
+      MODELS.forEach(m => {
+        w[m.slug] = true;
+        visibility[m.slug] = true;
+        const uiRow = uiRows.get(m.slug);
+        if (uiRow) uiRow.row.style.display = '';
+      });
+      saveJSON(KEY.watched, w); saveVisibility();
+      renderBarChips(); renderWatchedModelList(); updateBarBtn();
+    }));
+    modelActions.appendChild(makeMinBtn('전체 해제', () => {
+      const w = {};
+      MODELS.forEach(m => {
+        w[m.slug] = false;
+        visibility[m.slug] = false;
+        const uiRow = uiRows.get(m.slug);
+        if (uiRow) uiRow.row.style.display = 'none';
+      });
+      saveJSON(KEY.watched, w); saveVisibility();
+      renderBarChips(); renderWatchedModelList(); updateBarBtn();
+    }));
+
+    modelHeader.append(modelLabel, modelActions);
+    modelSec.append(modelHeader, watchedList);
+    container.appendChild(modelSec);
+  }
+
+  // ────────────────────────────────────────────────────────────
+  //  알림 섹션 빌드
+  // ────────────────────────────────────────────────────────────
+  function buildAlertSection(container) {
+    // 알림 방식
     const modeSec = document.createElement('div'); modeSec.className = 'crs-section';
     const modeLabel = document.createElement('div'); modeLabel.className = 'crs-section-label'; modeLabel.textContent = '알림 방식';
     modeSec.appendChild(modeLabel);
 
-    // 소리 토글
+    // 소리
     const soundRow = document.createElement('div'); soundRow.className = 'crs-toggle-row';
     const soundText = document.createElement('div');
     soundText.innerHTML = `<div class="crs-toggle-text">🔊 소리</div><div class="crs-toggle-sub">비프음 재생</div>`;
@@ -763,7 +736,7 @@
     soundRow.append(soundText, soundSw);
     modeSec.appendChild(soundRow);
 
-    // 볼륨 행
+    // 볼륨
     const volRow = document.createElement('div'); volRow.className = 'crs-vol-row';
     const volIcon = document.createElement('span'); volIcon.className = 'crs-vol-icon'; volIcon.textContent = '🔉';
     const volSlider = document.createElement('input');
@@ -782,16 +755,16 @@
     volRow.append(volIcon, volSlider, volVal, testBtn);
     modeSec.appendChild(volRow);
 
-    // 팝업 토글
+    // 팝업
     const popupRow = document.createElement('div'); popupRow.className = 'crs-toggle-row'; popupRow.style.marginTop = '4px';
     const popupText = document.createElement('div');
     popupText.innerHTML = `<div class="crs-toggle-text">🖥 팝업</div><div class="crs-toggle-sub">시스템 알림 또는 화면 내 토스트</div>`;
     const { wrap: popupSw } = makeSwitch(KEY.popup, true);
     popupRow.append(popupText, popupSw);
     modeSec.appendChild(popupRow);
-    pane.appendChild(modeSec);
+    container.appendChild(modeSec);
 
-    // 임계 점수 섹션
+    // 임계 점수
     const scoreSec = document.createElement('div'); scoreSec.className = 'crs-section';
     const scoreSecLabel = document.createElement('div'); scoreSecLabel.className = 'crs-section-label'; scoreSecLabel.textContent = '임계 점수';
     scoreSec.appendChild(scoreSecLabel);
@@ -808,71 +781,9 @@
     const scoreUnit = document.createElement('span'); scoreUnit.className = 'crs-score-unit'; scoreUnit.textContent = '점';
     scoreRow.append(scoreLbl, scoreInput, scoreUnit);
     scoreSec.appendChild(scoreRow);
-    pane.appendChild(scoreSec);
+    container.appendChild(scoreSec);
 
-    const hr1 = document.createElement('hr'); hr1.className = 'crs-divider';
-    pane.appendChild(hr1);
-
-    // 감시 모델 섹션
-    const modelSec = document.createElement('div'); modelSec.className = 'crs-section';
-    const modelHeader = document.createElement('div'); modelHeader.className = 'crs-model-header';
-    const modelSecLabel = document.createElement('div');
-    modelSecLabel.className = 'crs-section-label'; modelSecLabel.style.marginBottom = '0'; modelSecLabel.textContent = '감시 모델';
-    const modelActions = document.createElement('div'); modelActions.className = 'crs-model-actions';
-
-    const watchedList = document.createElement('div'); watchedList.className = 'crs-model-list';
-
-    // renderWatchedModelList를 모듈 수준에서 접근 가능하도록 할당
-    renderWatchedModelList = function () {
-      watchedList.innerHTML = '';
-      const watched   = loadJSON(KEY.watched, {});
-      const threshold = Number(load(KEY.threshold, 70));
-      for (const m of MODELS) {
-        const d        = lastData.get(m.slug) || {};
-        const scoreNum = Number.isFinite(d.scoreNum) ? d.scoreNum : NaN;
-        const isWatched = !!watched[m.slug];
-
-        const item = document.createElement('label'); item.className = 'crs-model-item';
-        const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = isWatched;
-        cb.addEventListener('change', () => {
-          const w = loadJSON(KEY.watched, {}); w[m.slug] = cb.checked;
-          saveJSON(KEY.watched, w); updateBarBtn(); renderWatchedModelList();
-        });
-        const nameSpan = document.createElement('span'); nameSpan.className = 'crs-model-name'; nameSpan.textContent = m.label;
-        const scoreSpan = document.createElement('span'); scoreSpan.className = 'crs-model-score';
-        const sc = scoreColor(scoreNum);
-        if (sc) scoreSpan.style.color = sc;
-        scoreSpan.textContent = Number.isFinite(scoreNum) ? `${scoreNum}점` : '—';
-        item.append(cb, nameSpan, scoreSpan);
-        if (isWatched && Number.isFinite(scoreNum) && scoreNum < threshold) {
-          const badge = document.createElement('span'); badge.className = 'crs-waiting'; badge.textContent = '대기 중';
-          item.appendChild(badge);
-        }
-        watchedList.appendChild(item);
-      }
-    };
-    renderWatchedModelList();
-
-    function makeMinBtn(text, onClick) {
-      const b = document.createElement('button'); b.className = 'crs-mini-btn'; b.textContent = text;
-      b.addEventListener('click', onClick); return b;
-    }
-    modelActions.appendChild(makeMinBtn('전체 선택', () => {
-      const w = {}; MODELS.forEach(m => { w[m.slug] = true; });
-      saveJSON(KEY.watched, w); renderWatchedModelList(); updateBarBtn();
-    }));
-    modelActions.appendChild(makeMinBtn('전체 해제', () => {
-      saveJSON(KEY.watched, {}); renderWatchedModelList(); updateBarBtn();
-    }));
-
-    modelHeader.append(modelSecLabel, modelActions);
-    modelSec.append(modelHeader, watchedList);
-    pane.appendChild(modelSec);
-
-    const hr2 = document.createElement('hr'); hr2.className = 'crs-divider';
-    pane.appendChild(hr2);
-
-    // 알림 권한 행
+    // 알림 권한
     const permRow = document.createElement('div'); permRow.className = 'crs-perm-row';
     const permLbl = document.createElement('span'); permLbl.className = 'crs-perm-label'; permLbl.textContent = '시스템 알림 권한';
     const permBtn = document.createElement('button'); permBtn.className = 'crs-perm-btn';
@@ -885,16 +796,85 @@
     refreshPermBtn();
     permBtn.addEventListener('click', () => { getCtx(); Notification.requestPermission().then(refreshPermBtn); });
     permRow.append(permLbl, permBtn);
-    pane.appendChild(permRow);
+    container.appendChild(permRow);
   }
 
-  function makeSwitch(storageKey, defaultVal, onChange) {
-    const label = document.createElement('label'); label.className = 'crs-sw';
-    const input = document.createElement('input'); input.type = 'checkbox'; input.checked = load(storageKey, defaultVal);
-    input.addEventListener('change', () => { save(storageKey, input.checked); if (onChange) onChange(input.checked); });
-    const track = document.createElement('span'); track.className = 'crs-sw-track';
-    label.append(input, track);
-    return { wrap: label, input };
+  // ────────────────────────────────────────────────────────────
+  //  패널 빌드 (탭 없는 단일 패널)
+  // ────────────────────────────────────────────────────────────
+  function buildPanel() {
+    panelEl = document.createElement('div');
+    panelEl.id = 'crs-panel';
+
+    // ── 상단 액션 행 (sticky): [↻ 갱신] [수신 시간]  ←→  [rs.igx.kr]
+    const actRow = document.createElement('div');
+    actRow.id = 'crs-panel-actions';
+
+    // 왼쪽: 갱신 버튼 + 타임스탬프
+    const actLeft = document.createElement('div');
+    actLeft.id = 'crs-act-left';
+
+    const refreshBtn = document.createElement('button');
+    refreshBtn.className = 'crs-panel-btn'; refreshBtn.textContent = '↻ 갱신';
+    refreshBtn.addEventListener('click', (e) => { e.stopPropagation(); refreshAll(); });
+
+    footerTsEl = document.createElement('span');
+    footerTsEl.id = 'crs-ts-label';
+    footerTsEl.textContent = '—';
+
+    actLeft.append(refreshBtn, footerTsEl);
+
+    // 오른쪽: rs.igx.kr 링크
+    const footLink = document.createElement('a');
+    footLink.href = 'https://rs.igx.kr/'; footLink.target = '_blank'; footLink.rel = 'noreferrer';
+    footLink.textContent = 'rs.igx.kr'; footLink.className = 'crs-foot-link';
+
+    actRow.append(actLeft, footLink);
+    panelEl.appendChild(actRow);
+
+    // ── 상태 섹션: 모델 행들
+    const statusSec = document.createElement('div');
+    statusSec.className = 'crs-sec-pad';
+
+    for (const m of MODELS) {
+      const row = document.createElement('div');
+      row.className = 'crs-row crs-s-unknown';
+      row.style.display = visibility[m.slug] ? '' : 'none';
+
+      const rtop = document.createElement('div'); rtop.className = 'crs-rtop';
+      const rname = document.createElement('div'); rname.className = 'crs-rname'; rname.textContent = m.label; rname.title = m.label;
+      const rstate = document.createElement('div'); rstate.className = 'crs-rstate';
+      rstate.innerHTML = `<span class="crs-dot"></span><span class="crs-stxt">WAIT</span>`;
+      rtop.append(rname, rstate);
+
+      const metric = document.createElement('div'); metric.className = 'crs-metric'; metric.textContent = '불러오는 중…';
+      row.append(rtop, metric);
+      statusSec.appendChild(row);
+      uiRows.set(m.slug, { row, stateEl: rstate, metricEl: metric });
+    }
+    panelEl.appendChild(statusSec);
+
+    // ── 모델 설정 섹션 (표시 + 감시 통합)
+    const modelSec = document.createElement('div');
+    modelSec.className = 'crs-sec-pad';
+    buildModelSection(modelSec);
+    panelEl.appendChild(modelSec);
+
+    // ── 알림 설정 섹션
+    const alertSec = document.createElement('div');
+    alertSec.className = 'crs-sec-pad';
+    buildAlertSection(alertSec);
+    panelEl.appendChild(alertSec);
+
+    document.body.appendChild(panelEl);
+
+    // 외부 클릭 시 닫기
+    document.addEventListener('click', (e) => {
+      if (panelOpen && !panelEl.contains(e.target) && !btnBarEl?.contains(e.target)) {
+        panelOpen = false;
+        panelEl.classList.remove('open');
+      }
+    });
   }
 
   // ────────────────────────────────────────────────────────────
@@ -905,11 +885,10 @@
     btnBarEl.id = 'crs-bar-btn';
     btnBarEl.title = 'Radiosonde 상태 / 알림 설정';
 
-    const icon = null; // 아이콘 제거 — 칩 텍스트만으로 구성
     barChipsEl = document.createElement('span'); barChipsEl.id = 'crs-bar-chips';
     barChipsEl.innerHTML = '<span style="opacity:0.40;font-size:13px;">불러오는 중…</span>';
 
-    // 갱신 버튼 (아이콘이 있던 자리)
+    // 갱신 버튼
     const refreshInline = document.createElement('button');
     refreshInline.id = 'crs-refresh-btn';
     refreshInline.title = '지금 갱신';
@@ -924,14 +903,15 @@
     btnBarEl.append(refreshInline, barChipsEl);
     btnBarEl.addEventListener('click', (e) => {
       e.stopPropagation();
-      getCtx(); // AudioContext 사전 초기화
+      getCtx();
       panelOpen = !panelOpen;
       panelEl.classList.toggle('open', panelOpen);
       if (panelOpen) {
-        // 버튼 우측 끝에 패널 정렬
         const rect = btnBarEl.getBoundingClientRect();
         const rightOffset = Math.max(0, window.innerWidth - rect.right);
         panelEl.style.right = rightOffset + 'px';
+        // 패널 너비를 버튼 너비에 맞춤 (최소 320px)
+        panelEl.style.width = Math.max(320, Math.round(rect.width)) + 'px';
       }
     });
     return btnBarEl;
@@ -940,18 +920,10 @@
   // ────────────────────────────────────────────────────────────
   //  헤더 주입
   // ────────────────────────────────────────────────────────────
-  // ─────────────────────────────────────────────────────────
-  //  헤더 주입 — Chasm Ignitor 방식 (플래그 없이 DOM 직접 체크)
-  // ─────────────────────────────────────────────────────────
-
-  // 오른쪽 버튼 컨테이너 탐색
-  // Chasm Ignitor 기준: css-l8r172[0] > childNodes[0] > div[0] > children[0] > last-child
   function findActionArea() {
-    // [전략 1] Chasm Ignitor가 이미 삽입한 burner-button의 부모 (가장 안정적)
     const burner = document.querySelector('button.burner-button');
     if (burner?.parentElement) return burner.parentElement;
 
-    // [전략 2] Chasm Ignitor와 동일한 emotion-css 클래스 + 탐색 경로
     const panels = document.getElementsByClassName('css-l8r172');
     if (panels.length > 0) {
       try {
@@ -964,7 +936,6 @@
       } catch (_) {}
     }
 
-    // [전략 3] bg-bg_screen + h-12 헤더에서 오른쪽 flex 컨테이너
     const chatHeader = Array.from(document.querySelectorAll('div')).find(el => {
       const c = typeof el.className === 'string' ? el.className : '';
       return c.includes('h-12') && c.includes('px-5') &&
@@ -981,7 +952,6 @@
   }
 
   function tryInjectHeader() {
-    // 이미 주입돼 있으면 아무것도 안 함 (플래그 대신 DOM 직접 확인)
     if (document.getElementById('crs-bar-btn')) return;
 
     injectStyles();
@@ -991,20 +961,14 @@
       buildPanel();
     }
 
-    // ── [전략 0] 최상단 바 네이티브 검색창 옆에 삽입 (최우선)
-    //    구조: div.gap-5.ml-auto > [div.w-full(검색)] [div.flex.shrink-0(아이콘)]
-    //    → 검색 wrapper와 아이콘 그룹 사이에 삽입
+    // [전략 0] 네이티브 검색창 옆 삽입 (최우선)
     const nativeSearch = document.querySelector('input[placeholder="검색어를 입력해 주세요"]');
     if (nativeSearch) {
-      // input → span.relative → div.w-full(검색 wrapper) → div.gap-5(부모 flex)
       const searchWrapper = nativeSearch.closest('div.w-full, div[class*="w-\\[335px\\]"]')
                          || nativeSearch.parentElement?.parentElement;
       const flexParent = searchWrapper?.parentElement;
-      // 아이콘 그룹: 검색 wrapper 바로 다음 div
-      const iconGroup = searchWrapper?.nextElementSibling;
       if (flexParent && searchWrapper) {
         buildBarBtn();
-        // 검색창 바로 앞(좌측)에 삽입
         flexParent.insertBefore(btnBarEl, searchWrapper);
         updateBarBtn();
         startPollingOnce();
@@ -1012,7 +976,7 @@
       }
     }
 
-    // ── 기존 전략들 (폴백)
+    // 기존 전략들 (폴백)
     const actionArea = findActionArea();
     if (!actionArea) return;
 
@@ -1042,7 +1006,6 @@
   }
 
   function startPollingOnce() {
-    // 처음 주입 시에만 폴링 시작 (중복 방지)
     if (!window._crsPolling) {
       window._crsPolling = true;
       setTimeout(() => refreshAll(), 800);
@@ -1050,13 +1013,12 @@
     }
   }
 
-  // ─────────────────────────────────────────────────────────
-  //  MutationObserver — Chasm Ignitor 방식으로 단순화
-  // ─────────────────────────────────────────────────────────
+  // ────────────────────────────────────────────────────────────
+  //  MutationObserver
+  // ────────────────────────────────────────────────────────────
   new MutationObserver(() => tryInjectHeader())
     .observe(document.body, { childList: true, subtree: true });
 
-  // 초기 시도 폴백
   tryInjectHeader();
   setTimeout(() => tryInjectHeader(), 1000);
   setTimeout(() => tryInjectHeader(), 3000);
