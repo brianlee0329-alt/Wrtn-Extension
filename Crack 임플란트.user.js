@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crack 임플란트
 // @namespace    https://crack.wrtn.ai
-// @version      1.0.0
-// @description  카드 이미지에 0.8초 호버 → 제목·제작자·옵션·한줄설명·태그·통계를 말풍선으로 표시
+// @version      1.0.1
+// @description  카드 이미지에 0.8초 호버 → 제목·제작자·옵션·한줄설명·태그·통계를 말풍선으로 표시 / 메인 페이지 플랫폼 기본 모달 억제
 // @author       Tyme
 // @match        https://crack.wrtn.ai/*
 // @grant        none
@@ -15,7 +15,7 @@
   /* ══════════════════════════════════════════════════════════════
      § 0. 설정
      ══════════════════════════════════════════════════════════════ */
-  const HOVER_DELAY  = 800;
+  const HOVER_DELAY  = 600;
   const BUBBLE_GAP   = 12;
   const BUBBLE_W     = 340;
   const BUBBLE_MAX_H = 650;
@@ -57,8 +57,8 @@
            url.includes('/api/stories') || url.includes('/api/characters');
   }
 
-function _digestJson(url, json) {
-    const visited = new WeakSet(); // 무한 루프 방지용
+  function _digestJson(url, json) {
+    const visited = new WeakSet();
 
     function traverse(obj) {
       if (!obj || typeof obj !== 'object') return;
@@ -66,7 +66,6 @@ function _digestJson(url, json) {
       visited.add(obj);
 
       const id = obj._id ?? obj.id;
-      // 24자리 Hex ID를 가졌고, 이름이나 제목이 있는 유의미한 객체인지 확인
       if (id && /^[a-f0-9]{24}$/.test(String(id))) {
         if (obj.name || obj.title || obj.simpleDescription || obj.description) {
           if (!cache.has(id) || cache.get(id)._partial) {
@@ -76,7 +75,6 @@ function _digestJson(url, json) {
         }
       }
 
-      // 하위 객체나 배열로 재귀 탐색
       if (Array.isArray(obj)) {
         for (let i = 0; i < obj.length; i++) traverse(obj[i]);
       } else {
@@ -91,54 +89,37 @@ function _digestJson(url, json) {
 
   /* ══════════════════════════════════════════════════════════════
      § 2. API 데이터 → CardInfo 변환
-     핵심 필드명 (확인된 실제 API):
-       simpleDescription  → 한줄 설명
-       description        → 상세 설명 (마크다운)
-       chatType.name      → 옵션 뱃지
-       target.name        → 옵션 뱃지
-       promptTemplate.name→ 옵션 뱃지
-       imageCount         → 옵션 뱃지 ("이미지 N장")
-       originContentTitle → 옵션 뱃지 ("2차 창작 : ...")
-       tags               → 문자열 배열
      ══════════════════════════════════════════════════════════════ */
   function _buildInfo(d) {
-    // ── 태그 ──
     const rawTags = d.hashtags ?? d.tags ?? [];
     const tags = rawTags.map(t => {
       const s = typeof t === 'string' ? t : (t?.name ?? t?.tag ?? t?.value ?? '');
       return s ? (s.startsWith('#') ? s : '#' + s) : null;
     }).filter(Boolean);
 
-    // ── 옵션 뱃지 ──
     const options = [];
 
-    // 이미지 N장
     if (d.hasImage && d.imageCount > 0)
       options.push(`이미지 ${d.imageCount}장`);
 
-    // 프롬프트 템플릿
     const tplName = typeof d.promptTemplate === 'string'
       ? d.promptTemplate
       : (d.promptTemplate?.name ?? d.promptTemplate?.type ?? null);
     if (tplName) options.push(String(tplName));
 
-    // 연령 제한 / target
     const targetName = typeof d.target === 'string'
       ? d.target
       : (d.target?.name ?? null);
     if (targetName) options.push(String(targetName));
 
-    // 채팅 유형
     const chatTypeName = typeof d.chatType === 'string'
       ? d.chatType
       : (d.chatType?.name ?? null);
     if (chatTypeName) options.push(String(chatTypeName));
 
-    // 2차 창작 원작 정보
     if (d.originContentTitle)
       options.push('2차 창작 : ' + String(d.originContentTitle));
 
-    // ── 한줄 설명 (simpleDescription 우선) ──
     const intro =
       _str(d.simpleDescription) ??
       _str(d.intro) ??
@@ -146,7 +127,6 @@ function _digestJson(url, json) {
       _str(d.oneliner) ??
       null;
 
-    // ── 상세 설명 ──
     const description = _str(d.detailDescription) ?? _str(d.description) ?? null;
 
     const isRich = !!(
@@ -166,11 +146,10 @@ function _digestJson(url, json) {
       chatCount:    _fmt(d.chatCount ?? d.totalMessageCount ?? d.playCount),
       likeCount:    _fmt(d.likeCount),
       commentCount: _fmt(d.commentCount),
-      _partial:     !isRich,   // ← 이 줄 추가
+      _partial:     !isRich,
     };
   }
 
-  /** 안전한 문자열 변환. object/null/[object Object] 방지 */
   function _str(v) {
     if (v == null) return null;
     if (typeof v === 'string') return v.trim() || null;
@@ -198,12 +177,6 @@ function _digestJson(url, json) {
 
   /* ══════════════════════════════════════════════════════════════
      § 4. 모달 DOM 파싱
-     구조 (대상.txt 기준):
-       css-yd8sa2 > p.css-ws11u4[color=text_primary]  → 한줄 설명
-       css-yd8sa2 > p.css-tdatza[color=text_tertiary] → 2차 창작 고지 (무시)
-       css-cmlkbw > p[color=text_secondary]           → 해시태그
-       css-lcrd7a                                     → 통계
-       data-clipping                                  → 옵션 뱃지
      ══════════════════════════════════════════════════════════════ */
   function _parseModal(root) {
     const titleEl =
@@ -215,12 +188,9 @@ function _digestJson(url, json) {
     const creatorEl = root.querySelector('.text-line-gray-1, [class*="text-line-gray-1"]');
     const creator = creatorEl?.textContent?.trim() || null;
 
-    // 옵션 뱃지
     const options = Array.from(root.querySelectorAll('[data-clipping="true"]'))
       .map(el => el.textContent.trim()).filter(Boolean);
 
-    // 한줄 설명: css-yd8sa2 안의 첫 번째 p (color="text_primary")만
-    // 두 번째 p는 2차창작 고지문이라 제외
     let intro = null;
     const ydEl = root.querySelector('.css-yd8sa2, [class*="css-yd8sa2"]');
     if (ydEl) {
@@ -228,19 +198,15 @@ function _digestJson(url, json) {
       intro = firstP?.textContent?.trim() || null;
     }
     if (!intro) {
-      // 폴백: css-ws11u4 직접 검색
       intro = root.querySelector('p.css-ws11u4')?.textContent?.trim() || null;
     }
 
-    // 상세 설명 (.wrtn-markdown)
     const mdEl = root.querySelector('.wrtn-markdown');
     const description = mdEl?.textContent?.trim() || null;
 
-    // 태그
     const tags = Array.from(root.querySelectorAll('[color="text_secondary"]'))
       .map(el => el.textContent.trim()).filter(t => t.startsWith('#'));
 
-    // 통계
     const statGroups = root.querySelectorAll('[class*="css-lcrd7a"]');
     let chatCount = null, likeCount = null, commentCount = null;
     statGroups.forEach((el, i) => {
@@ -264,11 +230,9 @@ function _digestJson(url, json) {
     const title = titleEl?.textContent?.trim() || null;
     if (!title) return null;
 
-    // 채팅수: text-line-gray-2는 Tailwind 독립 클래스이므로 직접 지정
     const statEl = card.querySelector('p.text-line-gray-2, p[class*="text-line-gray-2"]');
     const chatCount = statEl?.textContent?.trim() || null;
 
-    // 제작자 버튼 (메인/검색 페이지에만 존재, 프로필 페이지 카드에는 없음)
     const creatorEl = card.querySelector('button[type="button"] p[class*="truncate"]');
     const creator = creatorEl?.textContent?.trim() || null;
 
@@ -279,18 +243,20 @@ function _digestJson(url, json) {
   }
 
   /* ══════════════════════════════════════════════════════════════
-     § 6. 모달 자동 캐싱
-     ══════════════════════════════════════════════════════════════ */
-  new MutationObserver(muts => {
-    for (const mut of muts) {
-      mut.addedNodes.forEach(node => {
-        if (node.nodeType !== 1) return;
-        const modal =
-          (node.id === 'web-modal' ? node : null) ??
-          node.querySelector?.('#web-modal') ??
-          (node.className?.includes?.('css-jmmlw3') ? node : null) ??
-          node.querySelector?.('[class*="css-jmmlw3"]');
-        if (!modal) return;
+   § 6. 모달 자동 캐싱 + 메인 페이지 팝오버 억제
+   ══════════════════════════════════════════════════════════════ */
+new MutationObserver(muts => {
+  for (const mut of muts) {
+    mut.addedNodes.forEach(node => {
+      if (node.nodeType !== 1) return;
+
+      // ── 기존: 플랫폼 상세 모달 캐싱 ──
+      const modal =
+        (node.id === 'web-modal' ? node : null) ??
+        node.querySelector?.('#web-modal') ??
+        (node.className?.includes?.('css-jmmlw3') ? node : null) ??
+        node.querySelector?.('[class*="css-jmmlw3"]');
+      if (modal) {
         const tryExtract = () => {
           const link = modal.querySelector('a[href*="/detail/"]');
           if (!link) return;
@@ -300,28 +266,115 @@ function _digestJson(url, json) {
           const info = _parseModal(modal);
           if (info) cache.set(m[1], info);
         };
-        setTimeout(tryExtract, 80);
+        setTimeout(tryExtract,  80);
         setTimeout(tryExtract, 350);
         setTimeout(tryExtract, 800);
+      }
+
+      // ── 신규: Floating UI 캐릭터 팝오버 억제 ──
+      // data-floating-ui-portal 하위 .z-popover 중
+      // img[alt="character_thumbnail"]을 포함한 것만 타겟
+      const portals = node.hasAttribute?.('data-floating-ui-portal')
+        ? [node]
+        : Array.from(node.querySelectorAll?.('[data-floating-ui-portal]') ?? []);
+
+      portals.forEach(portal => {
+        const popover = portal.querySelector('.z-popover') ?? portal;
+        const trySuppress = () => {
+          if (popover.querySelector('img[alt="character_thumbnail"]') && _isMainPage())
+            _suppressModal(popover);
+        };
+        setTimeout(trySuppress,   0);
+        setTimeout(trySuppress, 150);
+        setTimeout(trySuppress, 400);
       });
+    });
+  }
+}).observe(document.documentElement, { childList: true, subtree: true });
+
+  /* ══════════════════════════════════════════════════════════════
+     § 6.5 메인 페이지 플랫폼 모달 억제
+     - 메인 페이지('/')에서만 작동 / 좋아요·프로필 페이지는 그대로
+     - 데이터 캐싱(§6)은 억제 전 setTimeout으로 이미 예약되므로 손실 없음
+     ══════════════════════════════════════════════════════════════ */
+  function _isMainPage() {
+    const p = location.pathname;
+    return p === '/' || p === '';
+  }
+
+  let _suppressedModal = null;
+  let _suppressObs     = null;
+
+  function _suppressModal(modal) {
+    if (_suppressObs) { _suppressObs.disconnect(); _suppressObs = null; }
+    _suppressedModal = modal;
+
+    const hide = () => {
+      modal.style.setProperty('display',        'none',   'important');
+      modal.style.setProperty('visibility',     'hidden', 'important');
+      modal.style.setProperty('pointer-events', 'none',   'important');
+    };
+
+    // 즉시 숨김 + 플랫폼이 style을 되돌리려 해도 재억제
+    hide();
+    _suppressObs = new MutationObserver(hide);
+    _suppressObs.observe(modal, {
+      attributes:      true,
+      attributeFilter: ['style', 'class'],
+    });
+  }
+
+  function _releaseSuppression() {
+    if (_suppressObs) { _suppressObs.disconnect(); _suppressObs = null; }
+    if (_suppressedModal) {
+      _suppressedModal.style.removeProperty('display');
+      _suppressedModal.style.removeProperty('visibility');
+      _suppressedModal.style.removeProperty('pointer-events');
+      _suppressedModal = null;
     }
-  }).observe(document.documentElement, { childList: true, subtree: true });
+  }
+
+  /* ══════════════════════════════════════════════════════════════
+     § 6.6 SPA 라우팅 감지 — 페이지 전환 시 억제 해제/재적용
+     Next.js는 history.pushState를 내부적으로 래핑하므로 직접 훅 필요
+     ══════════════════════════════════════════════════════════════ */
+  (function _hookRouter() {
+    const _origPush    = history.pushState;
+    const _origReplace = history.replaceState;
+
+    const onRoute = () => {
+      if (!_isMainPage()) {
+        // 메인 외 페이지 진입 → 억제 해제 (플랫폼 모달 정상 작동)
+        _releaseSuppression();
+      } else if (_suppressedModal) {
+        // 메인으로 복귀 시 이미 열려있는 모달이 있으면 재억제
+        _suppressModal(_suppressedModal);
+      }
+    };
+
+    history.pushState = function (...a) {
+      _origPush.apply(this, a); onRoute();
+    };
+    history.replaceState = function (...a) {
+      _origReplace.apply(this, a); onRoute();
+    };
+    window.addEventListener('popstate', onRoute);
+  })();
 
   /* ══════════════════════════════════════════════════════════════
      § 7. 직접 API 호출
      ══════════════════════════════════════════════════════════════ */
-function _fetchById(id) {
+  function _fetchById(id) {
     return new Promise(resolve => {
       if (cache.has(id) && !cache.get(id)._partial) { resolve(cache.get(id)); return; }
 
-      // 스토리인지 캐릭터인지 모르므로 순차적으로 시도합니다.
       const fetchAs = (type) => _origFetch(`${API_BASE}/${type}/${id}`, { credentials: 'include' })
         .then(r => r.ok ? r.json() : Promise.reject());
 
       fetchAs('stories')
         .catch(() => fetchAs('characters'))
         .then(json => {
-          _digestJson('direct_fetch', json); // 방금 만든 강력한 탐색기로 캐싱
+          _digestJson('direct_fetch', json);
           resolve(cache.get(id) ?? null);
         })
         .catch(() => resolve(null));
@@ -339,16 +392,14 @@ function _fetchById(id) {
       let node = el[fKey];
       for (let i = 0; i < 80 && node; i++) {
         const props = node.memoizedProps ?? node.pendingProps ?? {};
-        // 직접 ID 필드 — sourceId를 contentId보다 앞에 둠
         for (const k of ['characterId', 'storyId', 'sourceId', 'contentId', 'id', '_id', 'postId', 'itemId']) {
           if (props[k] && /^[a-f0-9]{24}$/.test(String(props[k]))) return String(props[k]);
         }
-        // 객체 내부 — sourceId 최우선 (content 래퍼에서 sourceId = 실제 story ID)
         for (const k of ['character', 'story', 'content', 'item', 'data', 'post',
                           'storyData', 'contentData', 'characterData', 'contentInfo']) {
           const obj = props[k];
           if (obj && typeof obj === 'object' && !Array.isArray(obj)) {
-            const id = obj.sourceId    // content 래퍼의 실제 story ID
+            const id = obj.sourceId
                     ?? obj._id
                     ?? obj.id
                     ?? obj.storyId
@@ -378,7 +429,6 @@ function _fetchById(id) {
     pop.innerHTML = _buildHTML(info);
     pop.addEventListener('mouseenter', () => clearTimeout(hideTimer));
     pop.addEventListener('mouseleave', _scheduleHide);
-    // 더보기 버튼 클릭
     pop.addEventListener('click', e => {
       const btn = e.target.closest('.crk-expand-btn');
       if (!btn) return;
@@ -396,44 +446,37 @@ function _fetchById(id) {
   function _buildHTML(info) {
     let h = '';
 
-    // 제목
     h += `<div class="crk-title">${_esc(info.title)}`;
     if (info._partial) h += ` <span class="crk-partial">···</span>`;
     h += `</div>`;
 
-    // 제작자
     if (info.creator)
       h += `<div class="crk-creator">by ${_esc(info.creator)}</div>`;
 
     const hasBody = info.options?.length || info.intro || info.description || info.tags?.length;
     if (hasBody) h += `<hr class="crk-hr">`;
 
-    // 옵션 뱃지
     if (info.options?.length) {
       h += `<div class="crk-options">`;
       info.options.forEach(o => { h += `<span class="crk-badge">${_esc(o)}</span>`; });
       h += `</div>`;
     }
 
-    // 한줄 설명 (simpleDescription)
     if (info.intro) {
       h += `<div class="crk-intro">${_md2html(info.intro)}</div>`;
     }
 
-    // 상세 설명 → 더보기 버튼 뒤에 숨김
     if (info.description && info.description !== info.intro) {
       h += `<button class="crk-expand-btn">상세 설명 더보기 ▾</button>`;
       h += `<div class="crk-desc-body" style="display:none">${_md2html(info.description)}</div>`;
     }
 
-    // 태그
     if (info.tags?.length) {
       h += `<div class="crk-tags">`;
       info.tags.slice(0, 10).forEach(t => { h += `<span class="crk-tag">${_esc(t)}</span>`; });
       h += `</div>`;
     }
 
-    // 통계
     const hasStats = info.chatCount != null || info.likeCount != null || info.commentCount != null;
     if (hasStats) {
       h += `<div class="crk-stats">`;
@@ -449,18 +492,26 @@ function _fetchById(id) {
     return `<span class="crk-stat"><span class="crk-si">${icon}</span>${_esc(String(val))}</span>`;
   }
 
-  /* ── 간이 마크다운 → HTML ── */
   function _md2html(text) {
     if (!text) return '';
-    return _esc(text)
-      // 마크다운 이스케이프 후 치환이므로 &lt; 등으로 바뀐 상태에서 처리
-      // bold **text**
-      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-      // italic *text*
-      .replace(/\*(.+?)\*/g, '<em>$1</em>')
-      // 줄바꿈
-      .replace(/\n/g, '<br>');
-  }
+    // 이미지는 이스케이프 전에 먼저 추출·치환
+    const IMG_PLACEHOLDER = '\x00IMG\x00';
+    const imgs = [];
+    const pre = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
+      imgs.push(`<img src="${url}" alt="${_esc(alt)}" class="crk-md-img">`);
+      return IMG_PLACEHOLDER;
+    });
+
+  // 나머지는 기존대로 이스케이프 후 마크다운 치환
+  let html = _esc(pre)
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g,     '<em>$1</em>')
+    .replace(/\n/g,            '<br>');
+
+  // 플레이스홀더를 실제 img 태그로 복원
+  imgs.forEach(tag => { html = html.replace(_esc(IMG_PLACEHOLDER), tag); });
+  return html;
+}
 
   function _position(pop, anchor) {
     const ar = anchor.getBoundingClientRect();
@@ -507,7 +558,7 @@ function _fetchById(id) {
            !!el.querySelector('img[alt="character_thumbnail"]');
   }
 
-async function _onEnter(e) {
+  async function _onEnter(e) {
     const card = e.currentTarget;
     hoveredCard = card;
     clearTimeout(hoverTimer);
@@ -516,10 +567,9 @@ async function _onEnter(e) {
       if (hoveredCard !== card) return;
 
       let id = _getIdFromFiber(card);
-      let domInfo = _parseCard(card); // DOM에서 먼저 기본 정보를 긁어옵니다.
+      let domInfo = _parseCard(card);
       let info = null;
 
-      // 💡 핵심: Fiber ID 추출 실패 시, 제목을 비교하여 캐시에서 ID를 역추적합니다.
       if (!id && domInfo?.title) {
         for (const [cachedId, cachedInfo] of cache.entries()) {
           if (cachedInfo.title === domInfo.title && !cachedInfo._partial) {
@@ -531,12 +581,11 @@ async function _onEnter(e) {
 
       if (id && cache.has(id) && !cache.get(id)._partial) info = cache.get(id);
       if (!info && id) info = await _fetchById(id);
-      if (!info) info = domInfo; // 끝내 못 찾으면 DOM 정보라도 보여줍니다.
+      if (!info) info = domInfo;
 
       if (!info || hoveredCard !== card) return;
       _showPopup(info, card);
 
-      // 부분 데이터만 있는 경우 백그라운드에서 상세 데이터를 가져와 보강합니다.
       if (info._partial && id) {
         _fetchById(id).then(full => {
           if (full && !full._partial && activePopup?.isConnected && hoveredCard === card)
@@ -552,8 +601,11 @@ async function _onEnter(e) {
     _scheduleHide();
   }
 
+  const _hookedCards = new WeakSet();
+
   function _hookCard(el) {
-    if (!_isCard(el) || el.dataset.crkPeek) return;
+    if (!_isCard(el) || _hookedCards.has(el)) return;
+    _hookedCards.add(el);
     el.dataset.crkPeek = '1';
     el.addEventListener('mouseenter', _onEnter);
     el.addEventListener('mouseleave',  _onLeave);
@@ -615,7 +667,6 @@ async function _onEnter(e) {
   from { opacity:0; transform:scale(.96) translateY(4px); }
   to   { opacity:1; transform:scale(1)   translateY(0); }
 }
-/* 말풍선 화살표 */
 #crk-peek::before {
   content:''; position:absolute;
   top:var(--crk-arrow-y,20px); margin-top:-8px;
@@ -633,12 +684,10 @@ async function _onEnter(e) {
   border-left:9px solid var(--crk-bg);
   filter:drop-shadow(1px 0 1px rgba(0,0,0,.35));
 }
-/* 내부 */
 #crk-peek .crk-title { font-size:14px; font-weight:700; color:var(--crk-text1); margin:0 0 3px; line-height:1.35; }
 #crk-peek .crk-partial { font-size:11px; font-weight:400; color:var(--crk-text3); margin-left:2px; }
 #crk-peek .crk-creator { font-size:11px; color:var(--crk-text3); }
 #crk-peek .crk-hr { border:none; border-top:1px solid var(--crk-border); margin:10px 0; }
-/* 옵션 뱃지 */
 #crk-peek .crk-options { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:9px; }
 #crk-peek .crk-badge {
   display:inline-flex; align-items:center; font-size:10.5px;
@@ -646,14 +695,12 @@ async function _onEnter(e) {
   color:var(--crk-text3); white-space:nowrap;
   max-width:230px; overflow:hidden; text-overflow:ellipsis;
 }
-/* 한줄 설명 */
 #crk-peek .crk-intro {
   font-size:13px; font-weight:500; color:var(--crk-text1);
   margin-bottom:9px; line-height:1.55;
 }
 #crk-peek .crk-intro strong { font-weight:700; }
 #crk-peek .crk-intro em { font-style:italic; }
-/* 더보기 버튼 */
 #crk-peek .crk-expand-btn {
   display:block; width:100%; text-align:left;
   font-size:11px; color:var(--crk-accent);
@@ -661,20 +708,21 @@ async function _onEnter(e) {
   cursor:pointer; opacity:.85;
 }
 #crk-peek .crk-expand-btn:hover { opacity:1; }
-/* 상세 설명 본문 */
 #crk-peek .crk-desc-body {
   font-size:12px; line-height:1.65; color:var(--crk-text2);
   margin-bottom:9px; border-top:1px solid var(--crk-border); padding-top:8px;
 }
 #crk-peek .crk-desc-body strong { font-weight:700; color:var(--crk-text1); }
 #crk-peek .crk-desc-body em { font-style:italic; }
-/* 태그 */
 #crk-peek .crk-tags { display:flex; flex-wrap:wrap; gap:3px 6px; margin-bottom:9px; }
 #crk-peek .crk-tag { font-size:11px; color:var(--crk-accent); opacity:.9; }
-/* 통계 */
 #crk-peek .crk-stats { display:flex; gap:14px; border-top:1px solid var(--crk-border); padding-top:9px; }
 #crk-peek .crk-stat { display:flex; align-items:center; gap:4px; font-size:11px; color:var(--crk-text3); }
 #crk-peek .crk-si { font-size:12px; line-height:1; }
+#crk-peek .crk-md-img {
+  max-width: 100%; border-radius: 6px; margin: 6px 0;
+  display: block;
+}
 `;
 
   function _injectCSS() {
