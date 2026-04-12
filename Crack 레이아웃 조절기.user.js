@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crack 레이아웃 조절기
 // @namespace    https://github.com/local/crack-layout
-// @version      1.5.5
+// @version      1.5.6
 // @description  채팅창 너비 조절 + 컴팩트 모드
 // @author       Tyme
 // @match        https://crack.wrtn.ai/stories/*
@@ -138,12 +138,24 @@
                크랙은 이미지 <span>에 pt-5(padding-top:1.25rem=20px)를 적용한다.
                float box 내에서 실제 이미지 픽셀이 20px 아래서 시작하므로,
                우측 텍스트 첫 문단(y=0 시작)보다 이미지가 낮아 보이는 문제 해소.
-               → .ck-group-img 안의 pt-5 패딩 제거 + 첫 텍스트 단락 margin-top 제거
+               → .ck-group-img 안의 pt-5 패딩 제거 + 첫 텍스트 요소 margin-top 제거
+
+               h1~h6 포함 이유:
+               마크다운 ## / ### 등이 렌더링된 헤딩 요소가 이미지 직후 첫 번째로
+               올 경우, 브라우저 기본 헤딩 margin-top이 그대로 적용되어 이미지
+               상단과 텍스트 상단이 어긋나는 정렬 파괴 현상이 발생한다.
+               → 헤딩도 <p>와 동일하게 margin-top 0 으로 처리.
             ────────────────────────────────────────────────────────────────────── */
             .ck-group-img .pt-5 {
                 padding-top: 0 !important;
             }
-            .ck-group-img + p {
+            .ck-group-img + p,
+            .ck-group-img + h1,
+            .ck-group-img + h2,
+            .ck-group-img + h3,
+            .ck-group-img + h4,
+            .ck-group-img + h5,
+            .ck-group-img + h6 {
                 margin-top: 0 !important;
             }
 
@@ -497,7 +509,7 @@
 
         // 채팅 컬럼 너비
         const { row: wRow, val: wVal } = makeRow('채팅 컬럼 너비', CFG.chatWidth + 'px');
-        const wSlider = makeSlider(600, 1600, 40, CFG.chatWidth);
+        const wSlider = makeSlider(600, 1320, 40, CFG.chatWidth);
         wSlider.addEventListener('input', () => {
             CFG.chatWidth = parseInt(wSlider.value, 10);
             wVal.textContent = CFG.chatWidth + 'px';
