@@ -1,9 +1,8 @@
 // ==UserScript==
 // @name         Crack 임플란트
 // @namespace    https://crack.wrtn.ai
-// @version      1.0.1
-// @description  카드 이미지에 0.8초 호버 → 제목·제작자·옵션·한줄설명·태그·통계를 말풍선으로 표시 / 메인 페이지 플랫폼 기본 모달 억제
-// @author       Tyme
+// @version      1.1.0
+// @description  카드 이미지에 0.8초 호버 → 말풍선 / 메인 페이지 모달 억제 / 나만의 태그 (말풍선·모달·작품페이지) / 좋아요 페이지 나만의 태그 탭
 // @match        https://crack.wrtn.ai/*
 // @grant        none
 // @run-at       document-start
@@ -26,13 +25,45 @@
      ══════════════════════════════════════════════════════════════ */
   const cache = new Map();
 
+  /* ── fetch 인터셉터 ─────────────────────────────────────────────
+     GC 최적화 (v1.3.0):
+       기존 res.clone().json()은 Response 전체를 복사(ArrayBuffer + 헤더)
+       한 뒤 JSON 파싱 트리까지 생성 → Young Gen에 대형 객체 3종 세트.
+       AI 답변 스트리밍 중 crack-api 요청이 연속 발생하면 이 사이클이
+       연속으로 반복되며 Minor GC를 조기에 유발했음.
+
+       ReadableStream.tee()로 대체:
+         body 스트림을 두 갈래(branch1, branch2)로 분기한다.
+         branch1은 새 Response에 실어 호출자에게 그대로 반환하고,
+         branch2는 우리 측에서 text()로 읽어 JSON.parse.
+         복사되는 것은 스트림 참조(포인터)뿐 — ArrayBuffer 실체는
+         딱 한 번만 메모리에 올라가고, 두 소비자가 각자 읽어간다.
+         Response 복사 객체가 생성되지 않으므로 GC 압력이 절반 이하로 감소.
+
+       주의: tee()는 body가 이미 소비됐거나 null인 경우(204, HEAD 응답 등)
+       TypeError를 던질 수 있음 → try-catch로 보호하고, 실패 시
+       원본 res를 그대로 반환해 호출자가 영향받지 않도록 처리.
+  ─────────────────────────────────────────────────────────────── */
   const _origFetch = window.fetch;
   window.fetch = async function (...args) {
     const res = await _origFetch.apply(this, args);
     try {
       const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url ?? '');
-      if (_isTargetUrl(url))
-        res.clone().json().then(json => _digestJson(url, json)).catch(() => {});
+      if (_isTargetUrl(url) && res.body) {
+        // body가 존재할 때만 tee() 시도
+        const [branch1, branch2] = res.body.tee();
+        // branch2를 비동기로 소비 (호출자 흐름과 완전히 분리)
+        new Response(branch2).text().then(txt => {
+          try { _digestJson(url, JSON.parse(txt)); } catch (_) {}
+        }).catch(() => {});
+        // 호출자에게는 branch1을 body로 갖는 새 Response를 반환
+        // headers, status, statusText는 원본에서 그대로 복사
+        return new Response(branch1, {
+          status:     res.status,
+          statusText: res.statusText,
+          headers:    res.headers,
+        });
+      }
     } catch (_) {}
     return res;
   };
@@ -58,6 +89,13 @@
   }
 
   function _digestJson(url, json) {
+    /* GC 최적화 (v1.3.0):
+       WeakSet을 traverse 클로저 내부에서 선언하면 _digestJson 호출마다
+       신규 WeakSet이 생성됐음. traverse는 재귀 호출이므로 WeakSet 자체는
+       1개지만, 선언 위치가 클로저 안에 있어도 호출 스택마다 새 환경 레코드에
+       바인딩되는 것처럼 보임. 실제로는 클로저가 한 번만 생성되지만,
+       _digestJson 호출마다 WeakSet이 재초기화됨 → 여기서 꺼내 1회만 생성.
+    */
     const visited = new WeakSet();
 
     function traverse(obj) {
@@ -137,6 +175,7 @@
     );
 
     return {
+      _id:          _str(d._id ?? d.id),
       title:        _str(d.name ?? d.title),
       creator:      _str(d.creator?.nickname ?? d.author?.nickname ?? d.creator?.name),
       options,
@@ -245,52 +284,54 @@
   /* ══════════════════════════════════════════════════════════════
    § 6. 모달 자동 캐싱 + 메인 페이지 팝오버 억제
    ══════════════════════════════════════════════════════════════ */
-new MutationObserver(muts => {
-  for (const mut of muts) {
-    mut.addedNodes.forEach(node => {
-      if (node.nodeType !== 1) return;
-
-      // ── 기존: 플랫폼 상세 모달 캐싱 ──
-      const modal =
-        (node.id === 'web-modal' ? node : null) ??
-        node.querySelector?.('#web-modal') ??
-        (node.className?.includes?.('css-jmmlw3') ? node : null) ??
-        node.querySelector?.('[class*="css-jmmlw3"]');
-      if (modal) {
-        const tryExtract = () => {
-          const link = modal.querySelector('a[href*="/detail/"]');
-          if (!link) return;
-          const m = link.getAttribute('href').match(/\/detail\/([a-f0-9]{24})/);
-          if (!m) return;
-          if (cache.has(m[1]) && !cache.get(m[1])._partial) return;
+  /* GC 최적화 (v1.3.0):
+     §6 / §6.7 / §10의 MutationObserver 3개를 하나로 통합하고
+     관찰 범위를 document.documentElement → document.body로 축소.
+     <head> 변경(폰트, 메타 태그 등)은 모달/카드/mytags 주입과 무관하므로
+     제외해도 기능에 영향 없음. SPA 전환 중 <head> 업데이트가 빈번한
+     Next.js 환경에서 콜백 호출 횟수가 눈에 띄게 줄어든다.
+     통합된 단일 Observer는 스크립트 말미(_initUnifiedObserver)에서 등록.
+  */
+  function _handleModalNode(node) {
+    // ── 플랫폼 상세 모달 캐싱 ──
+    const modal =
+      (node.id === 'web-modal' ? node : null) ??
+      node.querySelector?.('#web-modal') ??
+      (node.className?.includes?.('css-jmmlw3') ? node : null) ??
+      node.querySelector?.('[class*="css-jmmlw3"]');
+    if (modal) {
+      const tryExtract = () => {
+        const link = modal.querySelector('a[href*="/detail/"]');
+        if (!link) return;
+        const m = link.getAttribute('href').match(/\/detail\/([a-f0-9]{24})/);
+        if (!m) return;
+        if (!cache.has(m[1]) || cache.get(m[1])._partial) {
           const info = _parseModal(modal);
           if (info) cache.set(m[1], info);
-        };
-        setTimeout(tryExtract,  80);
-        setTimeout(tryExtract, 350);
-        setTimeout(tryExtract, 800);
-      }
+        }
+        _injectMyTagsInModal(modal, m[1]);
+      };
+      setTimeout(tryExtract,  80);
+      setTimeout(tryExtract, 350);
+      setTimeout(tryExtract, 800);
+    }
 
-      // ── 신규: Floating UI 캐릭터 팝오버 억제 ──
-      // data-floating-ui-portal 하위 .z-popover 중
-      // img[alt="character_thumbnail"]을 포함한 것만 타겟
-      const portals = node.hasAttribute?.('data-floating-ui-portal')
-        ? [node]
-        : Array.from(node.querySelectorAll?.('[data-floating-ui-portal]') ?? []);
+    // ── Floating UI 캐릭터 팝오버 억제 ──
+    const portals = node.hasAttribute?.('data-floating-ui-portal')
+      ? [node]
+      : Array.from(node.querySelectorAll?.('[data-floating-ui-portal]') ?? []);
 
-      portals.forEach(portal => {
-        const popover = portal.querySelector('.z-popover') ?? portal;
-        const trySuppress = () => {
-          if (popover.querySelector('img[alt="character_thumbnail"]') && _isMainPage())
-            _suppressModal(popover);
-        };
-        setTimeout(trySuppress,   0);
-        setTimeout(trySuppress, 150);
-        setTimeout(trySuppress, 400);
-      });
+    portals.forEach(portal => {
+      const popover = portal.querySelector('.z-popover') ?? portal;
+      const trySuppress = () => {
+        if (popover.querySelector('img[alt="character_thumbnail"]') && _isMainPage())
+          _suppressModal(popover);
+      };
+      setTimeout(trySuppress,   0);
+      setTimeout(trySuppress, 150);
+      setTimeout(trySuppress, 400);
     });
   }
-}).observe(document.documentElement, { childList: true, subtree: true });
 
   /* ══════════════════════════════════════════════════════════════
      § 6.5 메인 페이지 플랫폼 모달 억제
@@ -344,11 +385,23 @@ new MutationObserver(muts => {
 
     const onRoute = () => {
       if (!_isMainPage()) {
-        // 메인 외 페이지 진입 → 억제 해제 (플랫폼 모달 정상 작동)
         _releaseSuppression();
       } else if (_suppressedModal) {
-        // 메인으로 복귀 시 이미 열려있는 모달이 있으면 재억제
         _suppressModal(_suppressedModal);
+      }
+      if (_isDetailPage()) {
+        setTimeout(_injectMyTagsInDetailPage, 400);
+        setTimeout(_injectMyTagsInDetailPage, 900);
+      }
+      // 좋아요 페이지 진입: 탭 초기화
+      if (_isLikedPage()) {
+        setTimeout(_initLikedTabs, 500);
+        setTimeout(_initLikedTabs, 1200);
+      } else {
+        // 좋아요 페이지에서 이탈 시: 탭 상태 리셋
+        // (DOM은 SPA가 교체하므로 플래그와 activeTab만 리셋)
+        _likedTabsInited = false;
+        _likedActiveTab  = 'story';
       }
     };
 
@@ -360,6 +413,432 @@ new MutationObserver(muts => {
     };
     window.addEventListener('popstate', onRoute);
   })();
+
+  /* ══════════════════════════════════════════════════════════════
+     § 6.7 작품 상세 페이지 (/detail/{id}) 나만의 태그 주입
+     - URL에서 직접 id 추출 → .css-cmlkbw 다음에 주입
+     - SPA 라우팅 전환 시 재적용
+     ══════════════════════════════════════════════════════════════ */
+  function _getDetailPageId() {
+    const m = location.pathname.match(/\/detail\/([a-f0-9]{24})/);
+    return m ? m[1] : null;
+  }
+
+  function _isDetailPage() {
+    return /^\/detail\/[a-f0-9]{24}/.test(location.pathname);
+  }
+
+  function _injectMyTagsInDetailPage() {
+    if (!_isDetailPage()) return;
+    const id = _getDetailPageId();
+    if (!id) return;
+
+    // 작품 상세 페이지 진입 시점에 스냅샷 보강
+    // 좋아요 페이지 외부(검색·작가·상세 등)에서 태그 입력 시 카드 DOM이 없으므로
+    // og:image 메타태그와 페이지 h1에서 제목·썸네일을 수집해 크랙 스냅샷에 추가
+    const existing = _loadCardSnapshot(id);
+    if (!existing?.thumbUrl) {
+      // og:image → CloudFront webp URL
+      const ogImg  = document.querySelector('meta[property="og:image"]')?.content ?? null;
+      // og:title 또는 h1에서 제목 추출
+      const ogTitle = document.querySelector('meta[property="og:title"]')?.content?.trim() ?? null;
+      const h1Title = document.querySelector('h1')?.textContent?.trim() ?? null;
+      const title   = ogTitle || h1Title || existing?.title || null;
+      if (ogImg || title) {
+        _saveCardSnapshot(id, {
+          title:     title,
+          creator:   existing?.creator   ?? null,
+          chatCount: existing?.chatCount ?? null,
+          thumbUrl:  ogImg ?? existing?.thumbUrl ?? null,
+        });
+      }
+    }
+
+    // 이미 주입됐으면 갱신만
+    const existingEl = document.querySelector('.crk-mytags[data-crk-ctx="detail"]');
+    if (existingEl) {
+      _refreshMyTagsSection(id, 'detail');
+      return;
+    }
+
+    // 삽입 앵커: .css-cmlkbw (플랫폼 태그 컨테이너)
+    const platformTags = document.querySelector('[class*="css-cmlkbw"]');
+    if (!platformTags) return;
+
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = _buildMyTagsHTML(id, 'detail');
+    const section = wrapper.firstElementChild;
+    platformTags.parentNode.insertBefore(section, platformTags.nextSibling);
+    _bindMyTagEvents(section);
+  }
+
+  // 초기 주입 (DOMContentLoaded 또는 즉시)
+  const _tryDetailInject = () => {
+    if (!_isDetailPage()) return;
+    // .css-cmlkbw가 아직 없으면 MutationObserver로 대기
+    if (document.querySelector('[class*="css-cmlkbw"]')) {
+      _injectMyTagsInDetailPage();
+    }
+  };
+
+  // 페이지 로드 시 시도 (React hydration 대기)
+  setTimeout(_tryDetailInject,  300);
+  setTimeout(_tryDetailInject,  800);
+  setTimeout(_tryDetailInject, 1500);
+
+  // MutationObserver로 css-cmlkbw 등장 감지 (상세 페이지 내)
+  // → 통합 Observer(_initUnifiedObserver)에서 처리됨
+  function _handleDetailNode(node) {
+    if (_isDetailPage() && !document.querySelector('.crk-mytags[data-crk-ctx="detail"]')) {
+      // 빠른 경로: 삽입된 노드 자체가 앵커를 포함하는지 먼저 확인
+      if (node.querySelector?.('[class*="css-cmlkbw"]') ||
+          node.className?.includes?.('css-cmlkbw')) {
+        _injectMyTagsInDetailPage();
+      }
+    }
+  }
+
+  /* ══════════════════════════════════════════════════════════════
+     § 6.8  좋아요 페이지 나만의 태그 탭
+     ─ /liked 페이지 전용
+     ─ 플랫폼의 [스토리 | 캐릭터] 탭바를 가로챠 [스토리 | 캐릭터 | 나만의 태그]로 확장
+     ─ 스토리/캐릭터: 플랫폼 원본 탭 대리클릭으로 React 상태 유지
+     ─ 나만의 태그: crk-card::* 스냅샷 기반 자체 카드 그리드 렌더
+     ─ 카드 스냅샷 저장소: localStorage crk-card::{id} → {title,creator,chatCount,thumbUrl}
+     ══════════════════════════════════════════════════════════════ */
+  function _isLikedPage() {
+    return /^\/liked/.test(location.pathname);
+  }
+
+  const CARD_LS_PREFIX = 'crk-card::';
+
+  /* 카드 스냅샷 저장
+     null thumbUrl 허용 — 나중에 보강 가능(_tryHarvestSnapshot 참고)
+     GC: JSON.stringify는 소형 객체(4필드)이므로 비용 미미 */
+  function _saveCardSnapshot(id, snap) {
+    try {
+      localStorage.setItem(CARD_LS_PREFIX + id, JSON.stringify(snap));
+    } catch(_) {}
+  }
+
+  function _loadCardSnapshot(id) {
+    try {
+      const raw = localStorage.getItem(CARD_LS_PREFIX + id);
+      return raw ? JSON.parse(raw) : null;
+    } catch(_) { return null; }
+  }
+
+  /* 좋아요 페이지 카드 DOM에서 스냅샷 추출 시도
+     - 이미 완전한 스냅샷(thumbUrl 있음)이면 스킵
+     - 통합 Observer 콜백에서 카드 삽입 시마다 호출됨 (지연 수집) */
+  function _tryHarvestSnapshot(cardEl) {
+    const id = _getIdFromFiber(cardEl);
+    if (!id) return;
+    const existing = _loadCardSnapshot(id);
+    if (existing?.thumbUrl) return; // 이미 완전함 → 스킵
+
+    const titleEl   = cardEl.querySelector(
+      'p.typo-text-base_leading-paragraph_semibold, p[class*="typo-text-base"][class*="semibold"]'
+    );
+    const title = titleEl?.textContent?.trim() || null;
+    // 제목조차 없으면 카드 렌더 미완성 → 스킵 (단, 이미 기존 스냅샷에 제목이 있으면 thumbUrl 보강 시도)
+    if (!title && !existing?.title) return;
+
+    const statEl    = cardEl.querySelector('p[class*="text-line-gray-2"]');
+    const creatorEl = cardEl.querySelector('button[type="button"] p[class*="truncate"]');
+    const imgEl     = cardEl.querySelector('img[alt="character_thumbnail"]');
+
+    _saveCardSnapshot(id, {
+      title:     title     || existing?.title     || null,
+      creator:   creatorEl?.textContent?.trim()   || existing?.creator   || null,
+      chatCount: statEl?.textContent?.trim()      || existing?.chatCount || null,
+      thumbUrl:  imgEl?.src                       || existing?.thumbUrl  || null,
+    });
+  }
+
+  /* localStorage에서 태그 데이터 전체 수집
+     반환: { tagName → [{ id, title }] }
+     GC 최적화: _tagsCache 히트 시 JSON.parse 생략 */
+  function _collectAllTags() {
+    const map = {};
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key.startsWith(TAG_LS_PREFIX)) continue;
+      const id = key.slice(TAG_LS_PREFIX.length);
+      if (!/^[a-f0-9]{24}$/.test(id)) continue;
+      const tags = _loadTags(id);
+      if (!Array.isArray(tags) || tags.length === 0) continue;
+      const title = cache.get(id)?.title ?? _loadCardSnapshot(id)?.title ?? null;
+      tags.forEach(tag => {
+        if (!map[tag]) map[tag] = [];
+        map[tag].push({ id, title });
+      });
+    }
+    return map;
+  }
+
+  /* ── 탭 상태 관리 ──────────────────────────────────────────── */
+  // 현재 활성 탭: 'story' | 'character' | 'mytag'
+  let _likedActiveTab = 'story';
+
+  /* 나만의 태그 탭 패널 렌더링 */
+  function _renderMyTagPanel(panel) {
+    const allTags  = _collectAllTags();
+    const tagNames = Object.keys(allTags).sort();
+
+    if (tagNames.length === 0) {
+      panel.innerHTML = `<p class="crk-lt-empty">태그를 붙인 작품이 없어요.<br>작품 카드에 호버해서 태그를 추가해보세요!</p>`;
+      return;
+    }
+
+    // 태그 pill 목록 + 선택된 태그 카드 그리드
+    // 처음엔 첫 번째 태그 선택 상태로 렌더
+    let selectedTag = panel.dataset.selectedTag || tagNames[0];
+    if (!allTags[selectedTag]) selectedTag = tagNames[0];
+    panel.dataset.selectedTag = selectedTag;
+
+    let h = `<div class="crk-lt-tagbar">`;
+    tagNames.forEach(t => {
+      const active = t === selectedTag ? ' crk-lt-pill-active' : '';
+      h += `<button class="crk-lt-pill${active}" data-tag="${_esc(t)}">${_esc(t)} <span class="crk-lt-pill-count">${allTags[t].length}</span></button>`;
+    });
+    h += `</div>`;
+    h += `<div class="crk-lt-grid" id="crk-lt-grid">`;
+
+    allTags[selectedTag].forEach(({ id }) => {
+      const snap = _loadCardSnapshot(id);
+      if (snap?.thumbUrl) {
+        h += `<div class="crk-lt-card" data-crk-id="${_esc(id)}" role="button" tabindex="0">`;
+        h += `  <div class="crk-lt-thumb"><img src="${_esc(snap.thumbUrl)}" alt="${_esc(snap.title ?? '')}" loading="lazy"></div>`;
+        h += `  <div class="crk-lt-info">`;
+        h += `    <p class="crk-lt-title">${_esc(snap.title ?? `작품 ${id.slice(-6)}`)}</p>`;
+        if (snap.creator)   h += `<p class="crk-lt-creator">${_esc(snap.creator)}</p>`;
+        if (snap.chatCount) h += `<p class="crk-lt-chat">💬 ${_esc(snap.chatCount)}</p>`;
+        h += `  </div>`;
+        h += `</div>`;
+      } else {
+        // 썸네일 없음: 텍스트 카드 (클릭 시 /detail/{id} 이동)
+        const label = snap?.title ?? `작품 ${id.slice(-6)}`;
+        h += `<div class="crk-lt-card crk-lt-card-noimg" data-crk-id="${_esc(id)}" data-crk-href="/detail/${_esc(id)}" role="button" tabindex="0">`;
+        h += `  <div class="crk-lt-info">`;
+        h += `    <p class="crk-lt-title">${_esc(label)}</p>`;
+        if (snap?.creator) h += `<p class="crk-lt-creator">${_esc(snap.creator)}</p>`;
+        h += `    <p class="crk-lt-noimg-hint">썸네일 미수집 — 클릭하면 새탭에서 작품 열기</p>`;
+        h += `  </div>`;
+        h += `</div>`;
+      }
+    });
+
+    h += `</div>`; // .crk-lt-grid
+    panel.innerHTML = h;
+
+    // pill 클릭 → 태그 전환
+    panel.querySelector('.crk-lt-tagbar').addEventListener('click', e => {
+      const pill = e.target.closest('.crk-lt-pill');
+      if (!pill) return;
+      panel.dataset.selectedTag = pill.dataset.tag;
+      _renderMyTagPanel(panel);
+    });
+
+    // 카드 클릭 처리
+    panel.querySelector('#crk-lt-grid').addEventListener('click', e => {
+      const card = e.target.closest('.crk-lt-card');
+      if (!card) return;
+      const id = card.dataset.crkId;
+      if (!id) return;
+
+      if (card.classList.contains('crk-lt-card-noimg')) {
+        // 썸네일 미수집 카드: history.pushState는 Next.js 라우터를 깨우지 못함 →
+        // window.open으로 새탭에서 열어 좋아요 페이지를 유지하면서 작품 확인 가능
+        window.open(`/detail/${id}`, '_blank', 'noopener');
+        return;
+      }
+
+      // 썸네일 있는 카드: 플랫폼 원본 카드 찾아 대리클릭
+      const platformCards = document.querySelectorAll('[data-crk-peek="1"]');
+      for (const pc of platformCards) {
+        const pcId = _getIdFromFiber(pc);
+        if (pcId === id) { pc.click(); return; }
+      }
+      // 플랫폼 카드 없으면(무한스크롤 미로드) 새탭 fallback
+      window.open(`/detail/${id}`, '_blank', 'noopener');
+    });
+
+    // 카드 키보드 접근성
+    panel.querySelector('#crk-lt-grid').addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        const card = e.target.closest('.crk-lt-card');
+        if (card) { e.preventDefault(); card.click(); }
+      }
+    });
+  }
+
+  /* ── 좋아요_목록_관리 renderAll 트리거 ──────────────────────
+     좋아요_목록_관리는 MutationObserver(150ms debounce)로 자동 실행되나
+     명시적으로 강제 트리거가 필요한 경우(나만의 태그→스토리 복원 등)에
+     lf-folder-card를 일시 제거해 foldersVanished 조건을 만족시킨다.
+  ──────────────────────────────────────────────────────────── */
+  function _triggerCompanionRender() {
+    const grid = document.querySelector('#liked-scroll div[class*="grid-cols-3"]');
+    if (!grid) return;
+    // foldersVanished 조건(savedFolderCount > 0 && renderedFolderCount === 0) 유발
+    const folders = [...grid.querySelectorAll('.lf-folder-card')];
+    folders.forEach(f => f.remove());
+    // MutationObserver가 변화를 감지해 renderAll() 재실행
+  }
+
+  /* 탭 전환 핵심 로직 */
+  function _switchLikedTab(tabName) {
+    _likedActiveTab = tabName;
+
+    // 우리 탭바 버튼 상태 갱신
+    document.querySelectorAll('#crk-liked-tabs .crk-lt-tab').forEach(btn => {
+      const active = btn.dataset.tab === tabName;
+      btn.classList.toggle('crk-lt-tab-active', active);
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+
+    const panel = document.getElementById('crk-lt-mytag-panel');
+
+    if (tabName === 'mytag') {
+      // 플랫폼 카드 래퍼 숨김
+      // 좋아요_목록_관리가 삽입한 flex.flex-col.gap-10 래퍼를 숨긴다
+      const lfWrap = document.querySelector(
+        '#liked-scroll .flex.flex-col.gap-10, #liked-scroll [class*="css-1f2qzn3"]'
+      );
+      if (lfWrap) {
+        lfWrap.dataset.crkHidden = '1';
+        lfWrap.style.setProperty('display', 'none', 'important');
+      }
+      if (panel) {
+        panel.style.display = '';
+        _renderMyTagPanel(panel);
+      }
+
+    } else {
+      // 나만의 태그 패널 숨김
+      if (panel) panel.style.display = 'none';
+
+      // 이전에 숨겼던 래퍼 복원
+      document.querySelectorAll('[data-crk-hidden="1"]').forEach(el => {
+        el.style.removeProperty('display');
+        delete el.dataset.crkHidden;
+      });
+
+      // 플랫폼 React 탭 전환 (캐릭터 카드는 React가 마운트해야 DOM에 생김)
+      const platformTablist = document.querySelector(
+        '[role="tablist"][aria-hidden="true"], [role="tablist"][style*="display: none"]'
+      );
+      const platformTabs = platformTablist
+        ? platformTablist.querySelectorAll('[role="tab"]')
+        : document.querySelectorAll('[role="tablist"]:not(#crk-liked-tabs) [role="tab"]');
+
+      const targetIdx  = tabName === 'story' ? 0 : 1;
+      const targetTab  = platformTabs[targetIdx];
+      const needsClick = targetTab && targetTab.getAttribute('data-state') !== 'active';
+
+      if (needsClick) {
+        // display:none 상태이므로 잠깐 visibility 복원 (레이아웃 측정 가능하게)
+        const tl = targetTab.closest('[role="tablist"]');
+        if (tl) {
+          tl.style.removeProperty('display');
+          tl.style.removeProperty('visibility');
+        }
+
+        // ★ 핵심: Radix UI Tabs는 onClick이 아닌 onMouseDown(실제로는
+        // onPointerDown)으로 탭을 활성화한다 (radix-ui/primitives#1879).
+        // .click()이나 dispatchEvent(MouseEvent('click'))은 Radix가
+        // 전혀 리스닝하지 않는 이벤트라 React state가 절대 바뀌지 않는다.
+        // pointerdown → mousedown → mouseup → click 순서로 실제 브라우저가
+        // 발생시키는 이벤트 체인을 그대로 재현해야 한다.
+        const rect = targetTab.getBoundingClientRect();
+        const cx = rect.left + rect.width / 2;
+        const cy = rect.top + rect.height / 2;
+        const evtOpts = {
+          bubbles: true, cancelable: true, composed: true,
+          clientX: cx, clientY: cy, button: 0,
+        };
+        targetTab.dispatchEvent(new PointerEvent('pointerdown', { ...evtOpts, pointerId: 1, pointerType: 'mouse' }));
+        targetTab.dispatchEvent(new MouseEvent('mousedown', evtOpts));
+        targetTab.dispatchEvent(new PointerEvent('pointerup',   { ...evtOpts, pointerId: 1, pointerType: 'mouse' }));
+        targetTab.dispatchEvent(new MouseEvent('mouseup',   evtOpts));
+        targetTab.dispatchEvent(new MouseEvent('click',     evtOpts));
+
+        // 클릭 후 React 렌더 대기(캐릭터 카드 마운트) → 다시 숨김
+        // rAF 한 번은 페인트 직전 시점이라 React commit이 끝나지 않을 수 있어
+        // 두 번 중첩해 다음 페인트 이후까지 확실히 대기
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (tl) tl.style.setProperty('display', 'none', 'important');
+          });
+        });
+      }
+
+      if (!needsClick) {
+        // 이미 해당 탭이 active 상태 (예: 나만의 태그에서 복귀했는데 플랫폼 탭은 안 변함)
+        // 좋아요_목록_관리 폴더 UI가 사라졌을 수 있으므로 재빌드 트리거
+        _triggerCompanionRender();
+      }
+    }
+  }
+
+  /* 좋아요 페이지 탭바 초기화 */
+  let _likedTabsInited = false;
+
+  function _initLikedTabs() {
+    if (!_isLikedPage()) return;
+
+    // 탭바 앵커: [role="tablist"]
+    const platformTablist = document.querySelector('[role="tablist"]');
+    if (!platformTablist) return;
+
+    // 이미 주입됐으면 갱신 스킵 (DOM 확인)
+    if (document.getElementById('crk-liked-tabs')) {
+      _likedTabsInited = true;
+      return;
+    }
+
+    // 플랫폼 원본 탭바: 이제 대리클릭 불필요 (카드 타입 필터링 방식으로 전환)
+    // 시각적으로만 숨김 (스크린리더 제외)
+    platformTablist.style.setProperty('display', 'none', 'important');
+    platformTablist.setAttribute('aria-hidden', 'true');
+
+    // 우리 탭바 생성
+    const tabbar = document.createElement('div');
+    tabbar.id = 'crk-liked-tabs';
+    tabbar.setAttribute('role', 'tablist');
+    tabbar.innerHTML = `
+      <button class="crk-lt-tab crk-lt-tab-active" data-tab="story"     role="tab" aria-selected="true"  tabindex="0">스토리</button>
+      <button class="crk-lt-tab"                    data-tab="character" role="tab" aria-selected="false" tabindex="-1">캐릭터</button>
+      <button class="crk-lt-tab"                    data-tab="mytag"     role="tab" aria-selected="false" tabindex="-1">나만의 태그</button>
+    `;
+
+    // 탭 클릭 이벤트
+    tabbar.addEventListener('click', e => {
+      const btn = e.target.closest('.crk-lt-tab');
+      if (!btn) return;
+      _switchLikedTab(btn.dataset.tab);
+    });
+
+    // 나만의 태그 패널 생성 (초기 숨김)
+    const panel = document.createElement('div');
+    panel.id = 'crk-lt-mytag-panel';
+    panel.style.display = 'none';
+
+    // 삽입 위치: 플랫폼 탭바 바로 앞
+    platformTablist.parentNode.insertBefore(tabbar,  platformTablist);
+    platformTablist.parentNode.insertBefore(panel, platformTablist.nextSibling);
+
+    // 현재 활성 탭 상태 반영
+    _switchLikedTab(_likedActiveTab);
+    _likedTabsInited = true;
+  }
+
+  // 좋아요 페이지 초기 진입
+  if (_isLikedPage()) {
+    setTimeout(_initLikedTabs,  600);
+    setTimeout(_initLikedTabs, 1400);
+  }
 
   /* ══════════════════════════════════════════════════════════════
      § 7. 직접 API 호출
@@ -428,7 +907,10 @@ new MutationObserver(muts => {
     pop.setAttribute('role', 'tooltip');
     pop.innerHTML = _buildHTML(info);
     pop.addEventListener('mouseenter', () => clearTimeout(hideTimer));
-    pop.addEventListener('mouseleave', _scheduleHide);
+    pop.addEventListener('mouseleave', (e) => {
+      if (e.relatedTarget?.closest?.('[data-floating-ui-portal]')) return;
+      _scheduleHide();
+    });
     pop.addEventListener('click', e => {
       const btn = e.target.closest('.crk-expand-btn');
       if (!btn) return;
@@ -438,6 +920,8 @@ new MutationObserver(muts => {
       body.style.display = open ? 'none' : 'block';
       btn.textContent   = open ? '상세 설명 더보기 ▾' : '접기 ▴';
     });
+    // 나만의 태그 이벤트 위임
+    _bindMyTagEvents(pop);
     document.body.appendChild(pop);
     activePopup = pop;
     _position(pop, anchor);
@@ -485,6 +969,12 @@ new MutationObserver(muts => {
       if (info.commentCount != null) h += _chip('💭', info.commentCount);
       h += `</div>`;
     }
+
+    // 나만의 태그 섹션 (id가 있을 때만)
+    if (info._id) {
+      h += _buildMyTagsHTML(info._id, 'popup');
+    }
+
     return h;
   }
 
@@ -547,6 +1037,189 @@ new MutationObserver(muts => {
   function _destroyPopup() { activePopup?.remove(); activePopup = null; }
 
   /* ══════════════════════════════════════════════════════════════
+     § 9.5  나만의 태그 (My Tags)
+     ─ localStorage 키: crk-tags::{24자리id}
+     ─ 값: JSON 배열  ["#태그1", "#태그2", ...]
+     ─ id 없으면 저장 비활성화 (제목 fallback 금지)
+     ══════════════════════════════════════════════════════════════ */
+
+  const TAG_LS_PREFIX = 'crk-tags::';
+
+  /* GC 최적화 (v1.3.0):
+     _loadTags는 _buildMyTagsHTML, _commitTagInput, _refreshMyTagsSection에서
+     호출되며, 팝업 열릴 때마다 동일 id에 대해 localStorage.getItem + JSON.parse를
+     반복했음. Map 기반 write-through 캐시로 교체.
+     - 첫 접근 시 1회만 파싱, 이후 메모리에서 직접 반환
+     - _saveTags에서 캐시 갱신 후 localStorage에 write
+     - 탭 간 공유가 필요 없는 데이터(개인 태그)이므로 인메모리 캐시 충분
+  */
+  const _tagsCache = new Map(); // id → string[]
+
+  function _loadTags(id) {
+    if (_tagsCache.has(id)) return _tagsCache.get(id);
+    try {
+      const arr = JSON.parse(localStorage.getItem(TAG_LS_PREFIX + id) ?? '[]');
+      const result = Array.isArray(arr) ? arr : [];
+      _tagsCache.set(id, result);
+      return result;
+    } catch(_) {
+      _tagsCache.set(id, []);
+      return [];
+    }
+  }
+
+  function _saveTags(id, arr) {
+    _tagsCache.set(id, arr);
+    localStorage.setItem(TAG_LS_PREFIX + id, JSON.stringify(arr));
+    // 좋아요 페이지의 나만의 태그 탭이 열려있으면 패널 갱신
+    if (_isLikedPage() && _likedActiveTab === 'mytag') {
+      const panel = document.getElementById('crk-lt-mytag-panel');
+      if (panel) _renderMyTagPanel(panel);
+    }
+  }
+
+  function _normalizeTag(raw) {
+    const s = raw.trim();
+    if (!s) return null;
+    return s.startsWith('#') ? s : '#' + s;
+  }
+
+  /* 나만의 태그 HTML 빌더
+     context: 'popup' | 'modal' */
+  function _buildMyTagsHTML(id, context) {
+    const tags = _loadTags(id);
+    const prefix = `crk-mt-${context}`;
+
+    let h = `<div class="crk-mytags" data-crk-id="${_esc(id)}" data-crk-ctx="${context}">`;
+    h += `<div class="crk-mytags-header">`;
+    h += `<span class="crk-mytags-label">나만의 태그</span>`;
+    h += `</div>`;
+
+    // 태그 목록
+    h += `<div class="crk-mytags-list">`;
+    if (tags.length) {
+      tags.forEach((t, i) => {
+        h += `<span class="crk-mytag-chip">`;
+        h += `${_esc(t)}`;
+        h += `<button class="crk-mytag-del" data-idx="${i}" title="삭제">×</button>`;
+        h += `</span>`;
+      });
+    } else {
+      h += `<span class="crk-mytags-empty">태그 없음</span>`;
+    }
+    h += `</div>`;
+
+    // 입력 폼
+    h += `<div class="crk-mytags-input-row">`;
+    h += `<input class="crk-mytags-input" type="text" placeholder="#태그 입력 후 Enter" maxlength="30">`;
+    h += `<button class="crk-mytags-add-btn" title="추가">+</button>`;
+    h += `</div>`;
+
+    h += `</div>`; // .crk-mytags
+    return h;
+  }
+
+  /* 나만의 태그 이벤트 바인딩 (이벤트 위임) */
+  function _bindMyTagEvents(root) {
+    root.addEventListener('click', e => {
+      // 삭제 버튼
+      const delBtn = e.target.closest('.crk-mytag-del');
+      if (delBtn) {
+        e.stopPropagation();
+        const container = delBtn.closest('.crk-mytags');
+        if (!container) return;
+        const id  = container.dataset.crkId;
+        const ctx = container.dataset.crkCtx;
+        const idx = parseInt(delBtn.dataset.idx, 10);
+        if (!id || isNaN(idx)) return;
+        const tags = _loadTags(id);
+        tags.splice(idx, 1);
+        _saveTags(id, tags);
+        _refreshMyTagsSection(id, ctx);
+        return;
+      }
+      // 추가 버튼
+      const addBtn = e.target.closest('.crk-mytags-add-btn');
+      if (addBtn) {
+        e.stopPropagation();
+        const container = addBtn.closest('.crk-mytags');
+        if (!container) return;
+        _commitTagInput(container);
+      }
+    });
+
+    root.addEventListener('keydown', e => {
+      if (e.key !== 'Enter') return;
+      const input = e.target.closest('.crk-mytags-input');
+      if (!input) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const container = input.closest('.crk-mytags');
+      if (!container) return;
+      _commitTagInput(container);
+    });
+  }
+
+  function _commitTagInput(container) {
+    const input = container.querySelector('.crk-mytags-input');
+    if (!input) return;
+    const id  = container.dataset.crkId;
+    const ctx = container.dataset.crkCtx;
+    if (!id) return;
+    const tag = _normalizeTag(input.value);
+    if (!tag) return;
+    const tags = _loadTags(id);
+    if (!tags.includes(tag)) {
+      tags.push(tag);
+      _saveTags(id, tags);
+    }
+    input.value = '';
+    _refreshMyTagsSection(id, ctx);
+  }
+
+  /* 태그 목록만 부분 리렌더 (팝업 expand 상태 보존) */
+  function _refreshMyTagsSection(id, ctx) {
+    // 같은 id + ctx를 가진 모든 .crk-mytags를 갱신
+    document.querySelectorAll(`.crk-mytags[data-crk-id="${id}"][data-crk-ctx="${ctx}"]`)
+      .forEach(container => {
+        const tags = _loadTags(id);
+        const list = container.querySelector('.crk-mytags-list');
+        if (!list) return;
+
+        if (tags.length) {
+          list.innerHTML = tags.map((t, i) =>
+            `<span class="crk-mytag-chip">${_esc(t)}<button class="crk-mytag-del" data-idx="${i}" title="삭제">×</button></span>`
+          ).join('');
+        } else {
+          list.innerHTML = `<span class="crk-mytags-empty">태그 없음</span>`;
+        }
+        // input 초기화 (방어)
+        const inp = container.querySelector('.crk-mytags-input');
+        if (inp) inp.value = '';
+      });
+  }
+
+  /* 플랫폼 상세 모달에 나만의 태그 섹션 주입 */
+  function _injectMyTagsInModal(modalRoot, id) {
+    if (!id) return;
+    // 이미 주입됐으면 갱신만
+    const existing = modalRoot.querySelector('.crk-mytags[data-crk-ctx="modal"]');
+    if (existing) {
+      _refreshMyTagsSection(id, 'modal');
+      return;
+    }
+    // 플랫폼 태그 컨테이너(.css-cmlkbw) 바로 뒤에 삽입
+    const platformTags = modalRoot.querySelector('[class*="css-cmlkbw"]');
+    if (!platformTags) return;
+
+    const wrapper = document.createElement('div');
+    wrapper.innerHTML = _buildMyTagsHTML(id, 'modal');
+    const section = wrapper.firstElementChild;
+    platformTags.parentNode.insertBefore(section, platformTags.nextSibling);
+    _bindMyTagEvents(section);
+  }
+
+  /* ══════════════════════════════════════════════════════════════
      § 10. 카드 후킹
      ══════════════════════════════════════════════════════════════ */
   let hoverTimer  = null;
@@ -584,18 +1257,23 @@ new MutationObserver(muts => {
       if (!info) info = domInfo;
 
       if (!info || hoveredCard !== card) return;
+      // id가 있으면 info에 보강 (태그 저장 키용)
+      if (id && !info._id) info = Object.assign({}, info, { _id: id });
       _showPopup(info, card);
 
       if (info._partial && id) {
         _fetchById(id).then(full => {
-          if (full && !full._partial && activePopup?.isConnected && hoveredCard === card)
+          if (full && !full._partial && activePopup?.isConnected && hoveredCard === card) {
             activePopup.innerHTML = _buildHTML(full);
+            _bindMyTagEvents(activePopup);
+          }
         });
       }
     }, HOVER_DELAY);
   }
 
-  function _onLeave() {
+  function _onLeave(e) {
+    if (e?.relatedTarget?.closest?.('[data-floating-ui-portal]')) return;
     hoveredCard = null;
     clearTimeout(hoverTimer);
     _scheduleHide();
@@ -609,6 +1287,10 @@ new MutationObserver(muts => {
     el.dataset.crkPeek = '1';
     el.addEventListener('mouseenter', _onEnter);
     el.addEventListener('mouseleave',  _onLeave);
+    // 모든 페이지에서 카드 훅킹 시 스냅샷 수집 시도
+    // (메인/검색/작가/좋아요 페이지 모두 동일한 카드 구조 사용)
+    // img 로드 완료 대기: 100ms 지연
+    setTimeout(() => _tryHarvestSnapshot(el), 100);
   }
 
   function _hookAll(root) {
@@ -618,14 +1300,31 @@ new MutationObserver(muts => {
   }
 
   _hookAll(document);
-  new MutationObserver(muts => {
-    muts.forEach(mut => {
-      mut.addedNodes.forEach(node => {
-        if (node.nodeType !== 1) return;
-        _hookAll(node);
-      });
-    });
-  }).observe(document.documentElement, { childList: true, subtree: true });
+
+  /* ══════════════════════════════════════════════════════════════
+     § 10.5  통합 MutationObserver
+     GC 최적화 (v1.3.0):
+       §6, §6.7, §10의 Observer 3개(모두 document.documentElement subtree)를
+       단일 Observer로 통합. 관찰 범위도 document.body로 축소.
+       - 콜백 호출 횟수 1/3 감소 (React 스트리밍 중 효과 집중)
+       - <head> 변경 트리거 제거
+       - 각 핸들러는 함수로 분리(_handleModalNode, _handleDetailNode)해
+         로직 독립성 유지
+     ══════════════════════════════════════════════════════════════ */
+  function _initUnifiedObserver() {
+    new MutationObserver(muts => {
+      for (const mut of muts) {
+        for (let i = 0; i < mut.addedNodes.length; i++) {
+          const node = mut.addedNodes[i];
+          if (node.nodeType !== 1) continue;
+          _handleModalNode(node);   // §6: 모달 캐싱 + 팝오버 억제
+          _handleDetailNode(node);  // §6.7: detail 페이지 mytags 주입
+          _hookAll(node);           // §10: 카드 훅
+        }
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+  }
+  _initUnifiedObserver();
 
   /* ══════════════════════════════════════════════════════════════
      § 11. 스타일 (말풍선)
@@ -634,10 +1333,11 @@ new MutationObserver(muts => {
 :root {
   --crk-bg:     #13131f;
   --crk-border: rgba(255,255,255,.12);
-  --crk-text1:  #eef0ff;
+  --crk-text1:  #A9A9A9;
   --crk-text2:  #b0b4cc;
   --crk-text3:  #6a6a90;
   --crk-accent: #7c74ff;
+  --crk-gold:   #f5c518;
   --crk-arrow-y: 20px;
 }
 #crk-peek {
@@ -722,6 +1422,312 @@ new MutationObserver(muts => {
 #crk-peek .crk-md-img {
   max-width: 100%; border-radius: 6px; margin: 6px 0;
   display: block;
+}
+
+/* ── 나만의 태그 (말풍선 + 플랫폼 모달 공용) ── */
+.crk-mytags {
+  margin-top: 10px;
+  border-top: 1px solid var(--crk-border);
+  padding-top: 9px;
+}
+.crk-mytags-header {
+  display: flex;
+  align-items: center;
+  margin-bottom: 7px;
+}
+.crk-mytags-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--crk-gold);
+  letter-spacing: .03em;
+  text-transform: uppercase;
+}
+.crk-mytags-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin-bottom: 8px;
+  min-height: 20px;
+}
+.crk-mytags-empty {
+  font-size: 11px;
+  color: var(--crk-text3);
+  font-style: italic;
+}
+.crk-mytag-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11.5px;
+  color: var(--crk-gold);
+  background: rgba(245,197,24,.10);
+  border: 1px solid rgba(245,197,24,.25);
+  border-radius: 5px;
+  padding: 2px 5px 2px 7px;
+  line-height: 1.3;
+}
+.crk-mytag-del {
+  background: none;
+  border: none;
+  color: rgba(245,197,24,.5);
+  font-size: 13px;
+  line-height: 1;
+  padding: 0 1px;
+  cursor: pointer;
+  transition: color .12s;
+}
+.crk-mytag-del:hover { color: var(--crk-gold); }
+.crk-mytags-input-row {
+  display: flex;
+  gap: 5px;
+}
+.crk-mytags-input {
+  flex: 1;
+  background: rgba(255,255,255,.05);
+  border: 1px solid var(--crk-border);
+  border-radius: 6px;
+  padding: 4px 9px;
+  font-size: 12px;
+  color: var(--crk-text1);
+  outline: none;
+  transition: border-color .15s;
+  font-family: inherit;
+}
+.crk-mytags-input::placeholder { color: var(--crk-text3); }
+.crk-mytags-input:focus {
+  border-color: rgba(245,197,24,.45);
+  background: rgba(245,197,24,.04);
+}
+.crk-mytags-add-btn {
+  background: rgba(245,197,24,.15);
+  border: 1px solid rgba(245,197,24,.30);
+  border-radius: 6px;
+  color: var(--crk-gold);
+  font-size: 16px;
+  line-height: 1;
+  padding: 0 10px;
+  cursor: pointer;
+  transition: background .15s;
+}
+.crk-mytags-add-btn:hover { background: rgba(245,197,24,.28); }
+
+/* 플랫폼 모달 내 나만의 태그 (별도 배경 패널) */
+#web-modal .crk-mytags,
+[class*="css-jmmlw3"] .crk-mytags,
+.crk-mytags[data-crk-ctx="detail"] {
+  margin: 8px 0 0;
+  border: 1px solid rgba(245,197,24,.20);
+  border-radius: 10px;
+  padding: 10px 12px 10px;
+  background: rgba(245,197,24,.03);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   §6.8  좋아요 페이지 나만의 태그 탭
+   ══════════════════════════════════════════════════════════════ */
+
+/* 우리 탭바 — 플랫폼 탭바와 동일한 레이아웃 */
+#crk-liked-tabs {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0;
+  border-bottom: 1px solid var(--outline_tertiary, rgba(0,0,0,.12));
+  background: transparent;
+  padding-bottom: 1px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+/* 탭 버튼 — 플랫폼 [role="tab"] 스타일 모사 */
+.crk-lt-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  padding: 16px 8px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text_tertiary, #999);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  cursor: pointer;
+  flex: 1;
+  transition: color .12s, border-color .12s, background .12s;
+  font-family: inherit;
+  border-radius: 0;
+}
+.crk-lt-tab:hover {
+  color: var(--text_primary, #111);
+  background: var(--hover, rgba(0,0,0,.04));
+}
+.crk-lt-tab-active {
+  color: var(--primary, #7c74ff) !important;
+  border-bottom-color: var(--primary, #7c74ff) !important;
+}
+
+/* 나만의 태그 패널 */
+#crk-lt-mytag-panel {
+  width: 100%;
+  padding-top: 16px;
+}
+
+/* 태그 pill 바 */
+.crk-lt-tagbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+.crk-lt-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 12px;
+  border-radius: 20px;
+  font-size: 12.5px;
+  font-weight: 600;
+  border: 1px solid var(--outline_tertiary, rgba(0,0,0,.12));
+  background: none;
+  color: var(--text_secondary, #555);
+  cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+  font-family: inherit;
+}
+.crk-lt-pill:hover {
+  background: rgba(245,197,24,.08);
+  border-color: rgba(245,197,24,.35);
+  color: var(--crk-gold);
+}
+.crk-lt-pill-active {
+  background: rgba(245,197,24,.13) !important;
+  border-color: rgba(245,197,24,.5) !important;
+  color: var(--crk-gold) !important;
+}
+.crk-lt-pill-count {
+  font-size: 11px;
+  font-weight: 700;
+  opacity: .75;
+}
+
+/* 카드 그리드 — 플랫폼 gap-x-2(8px) / gap-y-10(40px) 일치 */
+.crk-lt-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  column-gap: 8px;
+  row-gap: 40px;
+}
+@media (max-width: 640px) {
+  .crk-lt-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* 카드 공통 — 플랫폼 카드는 border/shadow 없음, rounded-lg(8px) */
+.crk-lt-card {
+  display: flex;
+  flex-direction: column;
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: transform .15s, box-shadow .15s;
+}
+.crk-lt-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 14px rgba(0,0,0,.10);
+}
+.crk-lt-card:focus-visible {
+  outline: 2px solid var(--crk-gold);
+  outline-offset: 2px;
+}
+
+/* 썸네일 — 플랫폼 aspect-[2/3] 일치 */
+.crk-lt-thumb {
+  width: 100%;
+  aspect-ratio: 2/3;
+  overflow: hidden;
+  background: rgba(0,0,0,.05);
+  flex-shrink: 0;
+  border-radius: 8px;
+}
+.crk-lt-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* 카드 정보 영역 — 플랫폼 flex-col gap-1(4px), padding 최소화 */
+.crk-lt-info {
+  padding: 6px 2px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.crk-lt-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text_primary, #111);
+  margin: 0;
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-height: 1.35;
+  word-break: break-all;
+}
+.crk-lt-creator {
+  font-size: 12px;
+  color: var(--text_tertiary, #aaa);
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.crk-lt-chat {
+  font-size: 12px;
+  color: var(--text_tertiary, #aaa);
+  margin: 0;
+}
+
+/* 썸네일 없는 카드 */
+.crk-lt-card-noimg {
+  min-height: 80px;
+  justify-content: center;
+}
+.crk-lt-noimg-hint {
+  font-size: 10.5px;
+  color: var(--text_tertiary, #bbb);
+  font-style: italic;
+  margin: 4px 0 0;
+}
+/* 썸네일 미수집 카드 힌트 텍스트 업데이트 (window.open 새탭 방식) */
+
+/* 빈 상태 메시지 */
+.crk-lt-empty {
+  font-size: 13px;
+  color: var(--text_tertiary, #aaa);
+  text-align: center;
+  padding: 48px 20px;
+  line-height: 1.8;
+  margin: 0;
+}
+
+/* 다크 모드 */
+@media (prefers-color-scheme: dark) {
+  .crk-lt-tab:hover { background: rgba(255,255,255,.05); color: var(--text_primary, #eee); }
+  .crk-lt-pill {
+    border-color: rgba(255,255,255,.12);
+    color: var(--text_secondary, #aaa);
+  }
+  .crk-lt-card {
+    background: var(--bg_elevated_primary, #1a1a28);
+    border-color: rgba(255,255,255,.07);
+  }
+  .crk-lt-card:hover { box-shadow: 0 6px 20px rgba(0,0,0,.35); }
+  .crk-lt-title { color: var(--text_primary, #eee); }
+  .crk-lt-thumb { background: rgba(255,255,255,.05); }
 }
 `;
 
