@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crack 임플란트
 // @namespace    https://crack.wrtn.ai
-// @version      1.1.0
+// @version      2.0.0
 // @description  카드 이미지에 0.8초 호버 → 말풍선 / 메인 페이지 모달 억제 / 나만의 태그 (말풍선·모달·작품페이지) / 좋아요 페이지 나만의 태그 탭
 // @match        https://crack.wrtn.ai/*
 // @grant        none
