@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crack 임플란트
 // @namespace    https://crack.wrtn.ai
-// @version      2.0.0
+// @version      2.1.0
 // @description  카드 이미지에 0.8초 호버 → 말풍선 / 메인 페이지 모달 억제 / 나만의 태그 (말풍선·모달·작품페이지) / 좋아요 페이지 나만의 태그 탭
 // @match        https://crack.wrtn.ai/*
 // @grant        none
@@ -314,6 +314,7 @@
       setTimeout(tryExtract,  80);
       setTimeout(tryExtract, 350);
       setTimeout(tryExtract, 800);
+      setTimeout(tryExtract, 1500);
     }
 
     // ── Floating UI 캐릭터 팝오버 억제 ──
@@ -428,6 +429,49 @@
     return /^\/detail\/[a-f0-9]{24}/.test(location.pathname);
   }
 
+  /* css-cmlkbw가 없는 작품(해시태그 미등록)의 fallback.
+     정상 작품에서는 [해시태그] → crk-mytags → [통계버튼] → 구분선 → 상세설명 순인데,
+     해시태그가 없으면 구분선 앞에 바로 꽂혀 [통계버튼] → 구분선 → crk-mytags → 상세설명이
+     되어 통계버튼 아래로 위치가 크게 밀린다. 통계버튼 그룹(css-1ktfy0c) 앞에 삽입하면
+     해시태그 유무와 무관하게 항상 통계버튼 위쪽이라는 동일한 상대 위치를 유지할 수 있다. */
+  function _findStatButtonAnchor(root) {
+    const statGroup = root.querySelector('[class*="css-1ktfy0c"]');
+    return statGroup ?? null;
+  }
+
+  function _findDetailSectionAnchor(root) {
+    const ps = root.querySelectorAll('p');
+    for (const p of ps) {
+      if (p.textContent?.trim() === '상세 설명') {
+        const section = p.parentElement; // 1단계만 — 제목+본문 wrapper
+        const prevSibling = section?.previousElementSibling;
+        if (prevSibling?.getAttribute('role') === 'none') return prevSibling;
+        return section ?? p.closest('div');
+      }
+    }
+    return null;
+  }
+
+  /* 앵커 우선순위:
+     1) css-cmlkbw — 해시태그 칩 wrapper (다수 작품에서 정상 위치)
+     2) css-1ktfy0c 통계버튼 그룹 앞 — 해시태그가 없을 때 위치 일관성 유지
+     3) "상세 설명" 앞 구분선 — 위 둘 다 없는 경우의 최종 fallback */
+  function _findMyTagAnchor(root) {
+    const cmlkbw = root.querySelector('[class*="css-cmlkbw"]');
+    if (cmlkbw) return cmlkbw;
+    const statGroup = _findStatButtonAnchor(root);
+    if (statGroup) {
+      let prev = statGroup.previousElementSibling;
+      // 이전 호출에서 이미 statGroup 바로 앞에 우리 crk-mytags를 삽입해둔 경우,
+      // previousElementSibling이 우리 자신이 되어 "현재 위치가 곧 정답"이라는
+      // 자기참조 루프에 빠진다. 그 경우는 우리 섹션의 이전 형제를 anchor로 써서
+      // 동일한 (이미 맞는) 위치를 그대로 가리키게 한다.
+      if (prev?.classList?.contains('crk-mytags')) prev = prev.previousElementSibling;
+      if (prev) return prev;
+    }
+    return _findDetailSectionAnchor(root);
+  }
+
   function _injectMyTagsInDetailPage() {
     if (!_isDetailPage()) return;
     const id = _getDetailPageId();
@@ -454,15 +498,21 @@
       }
     }
 
-    // 이미 주입됐으면 갱신만
+    // 이미 주입됐으면 갱신만 (단, 더 정확한 앵커가 늦게 나타나 fallback 위치에
+    // 고정된 경우 올바른 위치로 재배치)
     const existingEl = document.querySelector('.crk-mytags[data-crk-ctx="detail"]');
+    const preferredAnchor = _findMyTagAnchor(document);
     if (existingEl) {
+      const alreadyCorrect = preferredAnchor && preferredAnchor.nextElementSibling === existingEl;
+      if (preferredAnchor && !alreadyCorrect) {
+        preferredAnchor.parentNode.insertBefore(existingEl, preferredAnchor.nextSibling);
+      }
       _refreshMyTagsSection(id, 'detail');
       return;
     }
 
-    // 삽입 앵커: .css-cmlkbw (플랫폼 태그 컨테이너)
-    const platformTags = document.querySelector('[class*="css-cmlkbw"]');
+    // 삽입 앵커: css-cmlkbw → 통계버튼 그룹 앞 → "상세 설명" 텍스트 순으로 시도
+    const platformTags = preferredAnchor;
     if (!platformTags) return;
 
     const wrapper = document.createElement('div');
@@ -475,8 +525,7 @@
   // 초기 주입 (DOMContentLoaded 또는 즉시)
   const _tryDetailInject = () => {
     if (!_isDetailPage()) return;
-    // .css-cmlkbw가 아직 없으면 MutationObserver로 대기
-    if (document.querySelector('[class*="css-cmlkbw"]')) {
+    if (_findMyTagAnchor(document)) {
       _injectMyTagsInDetailPage();
     }
   };
@@ -486,13 +535,15 @@
   setTimeout(_tryDetailInject,  800);
   setTimeout(_tryDetailInject, 1500);
 
-  // MutationObserver로 css-cmlkbw 등장 감지 (상세 페이지 내)
+  // MutationObserver로 앵커 등장 감지 (상세 페이지 내)
   // → 통합 Observer(_initUnifiedObserver)에서 처리됨
   function _handleDetailNode(node) {
     if (_isDetailPage() && !document.querySelector('.crk-mytags[data-crk-ctx="detail"]')) {
       // 빠른 경로: 삽입된 노드 자체가 앵커를 포함하는지 먼저 확인
       if (node.querySelector?.('[class*="css-cmlkbw"]') ||
-          node.className?.includes?.('css-cmlkbw')) {
+          node.className?.includes?.('css-cmlkbw') ||
+          node.querySelector?.('button[aria-label="좋아요"]') ||
+          node.textContent?.includes?.('상세 설명')) {
         _injectMyTagsInDetailPage();
       }
     }
@@ -581,7 +632,45 @@
   // 현재 활성 탭: 'story' | 'character' | 'mytag'
   let _likedActiveTab = 'story';
 
-  /* 나만의 태그 탭 패널 렌더링 */
+  /* 태그(카테고리)별 펼침 상태 저장 키 */
+  const MYTAG_EXPAND_LS_KEY = 'crk-mytag-expanded';
+
+  function _loadExpandedTags() {
+    try {
+      const raw = localStorage.getItem(MYTAG_EXPAND_LS_KEY);
+      return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch(_) { return new Set(); }
+  }
+  function _saveExpandedTags(set) {
+    try { localStorage.setItem(MYTAG_EXPAND_LS_KEY, JSON.stringify([...set])); } catch(_) {}
+  }
+
+  /* 카드 한 장의 HTML — 좋아요_목록_관리와 무관하게 항상
+     이미지 164.8×247.19px / 정보 영역 164.8×88.22px 고정 치수로 렌더 */
+  function _buildMyTagCardHTML(id, snap) {
+    if (snap?.thumbUrl) {
+      let h = `<div class="crk-lt-card" data-crk-id="${_esc(id)}" role="button" tabindex="0">`;
+      h += `  <div class="crk-lt-thumb"><img src="${_esc(snap.thumbUrl)}" alt="${_esc(snap.title ?? '')}" loading="lazy"></div>`;
+      h += `  <div class="crk-lt-info">`;
+      h += `    <p class="crk-lt-title">${_esc(snap.title ?? `작품 ${id.slice(-6)}`)}</p>`;
+      if (snap.creator)   h += `<p class="crk-lt-creator">${_esc(snap.creator)}</p>`;
+      if (snap.chatCount) h += `<p class="crk-lt-chat">💬 ${_esc(snap.chatCount)}</p>`;
+      h += `  </div>`;
+      h += `</div>`;
+      return h;
+    }
+    const label = snap?.title ?? `작품 ${id.slice(-6)}`;
+    let h = `<div class="crk-lt-card crk-lt-card-noimg" data-crk-id="${_esc(id)}" data-crk-href="/detail/${_esc(id)}" role="button" tabindex="0">`;
+    h += `  <div class="crk-lt-info">`;
+    h += `    <p class="crk-lt-title">${_esc(label)}</p>`;
+    if (snap?.creator) h += `<p class="crk-lt-creator">${_esc(snap.creator)}</p>`;
+    h += `    <p class="crk-lt-noimg-hint">썸네일 미수집 — 클릭하면 새탭에서 작품 열기</p>`;
+    h += `  </div>`;
+    h += `</div>`;
+    return h;
+  }
+
+  /* 나만의 태그 탭 패널 렌더링 — 태그별 접기/펼치기 카테고리 섹션 */
   function _renderMyTagPanel(panel) {
     const allTags  = _collectAllTags();
     const tagNames = Object.keys(allTags).sort();
@@ -591,57 +680,50 @@
       return;
     }
 
-    // 태그 pill 목록 + 선택된 태그 카드 그리드
-    // 처음엔 첫 번째 태그 선택 상태로 렌더
-    let selectedTag = panel.dataset.selectedTag || tagNames[0];
-    if (!allTags[selectedTag]) selectedTag = tagNames[0];
-    panel.dataset.selectedTag = selectedTag;
+    const expanded = _loadExpandedTags();
+    // 첫 진입 시(저장된 펼침 상태가 전혀 없을 때) 첫 번째 카테고리만 기본 펼침
+    if (expanded.size === 0) expanded.add(tagNames[0]);
 
-    let h = `<div class="crk-lt-tagbar">`;
-    tagNames.forEach(t => {
-      const active = t === selectedTag ? ' crk-lt-pill-active' : '';
-      h += `<button class="crk-lt-pill${active}" data-tag="${_esc(t)}">${_esc(t)} <span class="crk-lt-pill-count">${allTags[t].length}</span></button>`;
+    let h = `<div class="crk-lt-categories" id="crk-lt-categories">`;
+    tagNames.forEach(tag => {
+      const works  = allTags[tag];
+      const isOpen = expanded.has(tag);
+      h += `<div class="crk-lt-cat" data-tag="${_esc(tag)}">`;
+      h += `  <button class="crk-lt-cat-header" data-tag="${_esc(tag)}" aria-expanded="${isOpen}">`;
+      h += `    <svg class="crk-lt-cat-chevron${isOpen ? ' crk-lt-cat-chevron-open' : ''}" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8.59 16.59 13.17 12 8.59 7.41 10 6l6 6-6 6z"/></svg>`;
+      h += `    <span class="crk-lt-cat-name">${_esc(tag)}</span>`;
+      h += `    <span class="crk-lt-cat-count">${works.length}</span>`;
+      h += `  </button>`;
+      h += `  <div class="crk-lt-cat-body" style="display:${isOpen ? '' : 'none'}">`;
+      h += `    <div class="crk-lt-grid" data-tag-grid="${_esc(tag)}">`;
+      works.forEach(({ id }) => {
+        h += _buildMyTagCardHTML(id, _loadCardSnapshot(id));
+      });
+      h += `    </div>`;
+      h += `  </div>`;
+      h += `</div>`;
     });
-    h += `</div>`;
-    h += `<div class="crk-lt-grid" id="crk-lt-grid">`;
-
-    allTags[selectedTag].forEach(({ id }) => {
-      const snap = _loadCardSnapshot(id);
-      if (snap?.thumbUrl) {
-        h += `<div class="crk-lt-card" data-crk-id="${_esc(id)}" role="button" tabindex="0">`;
-        h += `  <div class="crk-lt-thumb"><img src="${_esc(snap.thumbUrl)}" alt="${_esc(snap.title ?? '')}" loading="lazy"></div>`;
-        h += `  <div class="crk-lt-info">`;
-        h += `    <p class="crk-lt-title">${_esc(snap.title ?? `작품 ${id.slice(-6)}`)}</p>`;
-        if (snap.creator)   h += `<p class="crk-lt-creator">${_esc(snap.creator)}</p>`;
-        if (snap.chatCount) h += `<p class="crk-lt-chat">💬 ${_esc(snap.chatCount)}</p>`;
-        h += `  </div>`;
-        h += `</div>`;
-      } else {
-        // 썸네일 없음: 텍스트 카드 (클릭 시 /detail/{id} 이동)
-        const label = snap?.title ?? `작품 ${id.slice(-6)}`;
-        h += `<div class="crk-lt-card crk-lt-card-noimg" data-crk-id="${_esc(id)}" data-crk-href="/detail/${_esc(id)}" role="button" tabindex="0">`;
-        h += `  <div class="crk-lt-info">`;
-        h += `    <p class="crk-lt-title">${_esc(label)}</p>`;
-        if (snap?.creator) h += `<p class="crk-lt-creator">${_esc(snap.creator)}</p>`;
-        h += `    <p class="crk-lt-noimg-hint">썸네일 미수집 — 클릭하면 새탭에서 작품 열기</p>`;
-        h += `  </div>`;
-        h += `</div>`;
-      }
-    });
-
-    h += `</div>`; // .crk-lt-grid
+    h += `</div>`; // .crk-lt-categories
     panel.innerHTML = h;
 
-    // pill 클릭 → 태그 전환
-    panel.querySelector('.crk-lt-tagbar').addEventListener('click', e => {
-      const pill = e.target.closest('.crk-lt-pill');
-      if (!pill) return;
-      panel.dataset.selectedTag = pill.dataset.tag;
-      _renderMyTagPanel(panel);
-    });
+    // 카테고리 헤더 클릭 → 접기/펼치기
+    panel.querySelector('#crk-lt-categories').addEventListener('click', e => {
+      const header = e.target.closest('.crk-lt-cat-header');
+      if (header) {
+        const tag  = header.dataset.tag;
+        const body = header.nextElementSibling;
+        const cur  = _loadExpandedTags();
+        const willOpen = !cur.has(tag);
+        if (willOpen) cur.add(tag); else cur.delete(tag);
+        _saveExpandedTags(cur);
+        header.setAttribute('aria-expanded', String(willOpen));
+        header.querySelector('.crk-lt-cat-chevron')
+          ?.classList.toggle('crk-lt-cat-chevron-open', willOpen);
+        body.style.display = willOpen ? '' : 'none';
+        return;
+      }
 
-    // 카드 클릭 처리
-    panel.querySelector('#crk-lt-grid').addEventListener('click', e => {
+      // 카드 클릭 처리
       const card = e.target.closest('.crk-lt-card');
       if (!card) return;
       const id = card.dataset.crkId;
@@ -665,7 +747,7 @@
     });
 
     // 카드 키보드 접근성
-    panel.querySelector('#crk-lt-grid').addEventListener('keydown', e => {
+    panel.querySelector('#crk-lt-categories').addEventListener('keydown', e => {
       if (e.key === 'Enter' || e.key === ' ') {
         const card = e.target.closest('.crk-lt-card');
         if (card) { e.preventDefault(); card.click(); }
@@ -789,7 +871,10 @@
     if (!_isLikedPage()) return;
 
     // 탭바 앵커: [role="tablist"]
-    const platformTablist = document.querySelector('[role="tablist"]');
+    // #liked-scroll 범위로 한정 — 새로고침 직후 하이드레이션 초기 시점에
+    // 페이지 다른 영역(헤더 네비게이션 등)의 무관한 tablist를 잘못 잡아
+    // 엉뚱한 위치에 탭바가 삽입되는 경우를 방지
+    const platformTablist = document.querySelector('#liked-scroll [role="tablist"]');
     if (!platformTablist) return;
 
     // 이미 주입됐으면 갱신 스킵 (DOM 확인)
@@ -835,9 +920,11 @@
   }
 
   // 좋아요 페이지 초기 진입
+  // 새로고침 직후 React 하이드레이션이 느린 경우를 대비해 호출 시점을 추가
   if (_isLikedPage()) {
     setTimeout(_initLikedTabs,  600);
     setTimeout(_initLikedTabs, 1400);
+    setTimeout(_initLikedTabs, 2500);
   }
 
   /* ══════════════════════════════════════════════════════════════
@@ -1202,14 +1289,24 @@
   /* 플랫폼 상세 모달에 나만의 태그 섹션 주입 */
   function _injectMyTagsInModal(modalRoot, id) {
     if (!id) return;
-    // 이미 주입됐으면 갱신만
     const existing = modalRoot.querySelector('.crk-mytags[data-crk-ctx="modal"]');
+
+    // 우선 앵커(css-cmlkbw)가 비동기 렌더링 중이라 첫 삽입 시점에 없어서
+    // fallback에 자리잡은 경우, 더 정확한 앵커가 나중에 나타나면 재배치한다.
+    // (existing이어도 무조건 갱신만 하고 끝내면 잘못된 위치에 영구히
+    // 고정되는 문제가 있었다)
+    const preferredAnchor = _findMyTagAnchor(modalRoot);
     if (existing) {
+      const alreadyCorrect = preferredAnchor && preferredAnchor.nextElementSibling === existing;
+      if (preferredAnchor && !alreadyCorrect) {
+        preferredAnchor.parentNode.insertBefore(existing, preferredAnchor.nextSibling);
+      }
       _refreshMyTagsSection(id, 'modal');
       return;
     }
-    // 플랫폼 태그 컨테이너(.css-cmlkbw) 바로 뒤에 삽입
-    const platformTags = modalRoot.querySelector('[class*="css-cmlkbw"]');
+
+    // 삽입 앵커: css-cmlkbw → 통계버튼 그룹 앞 → "상세 설명" 텍스트 순으로 시도
+    const platformTags = preferredAnchor;
     if (!platformTags) return;
 
     const wrapper = document.createElement('div');
@@ -1533,10 +1630,16 @@
   justify-content: flex-start;
   gap: 0;
   border-bottom: 1px solid var(--outline_tertiary, rgba(0,0,0,.12));
-  background: transparent;
+  background: var(--bg_screen, #fff);
   padding-bottom: 1px;
   width: 100%;
   box-sizing: border-box;
+  position: relative;
+  z-index: 11;
+  /* 부모 width 계산이 일시적으로 0/auto가 되는 레이스 컨디션에서도
+     탭바가 가느다란 선으로 짜부러지지 않도록 최소 높이를 강제 고정.
+     (버튼 padding 16px*2 + line-height 1 기준 텍스트 높이 ≈ 48px) */
+  min-height: 48px;
 }
 
 /* 탭 버튼 — 플랫폼 [role="tab"] 스타일 모사 */
@@ -1555,7 +1658,10 @@
   border-bottom: 2px solid transparent;
   margin-bottom: -2px;
   cursor: pointer;
-  flex: 1;
+  /* flex:1 단축은 flex-basis:0%를 포함 — 부모 width 계산이 흔들리면
+     버튼이 텍스트 내용보다 작게(0까지) 짜부러질 수 있다.
+     flex-basis를 auto로 둬 텍스트 실제 크기를 최소 보장한다. */
+  flex: 1 1 auto;
   transition: color .12s, border-color .12s, background .12s;
   font-family: inherit;
   border-radius: 0;
@@ -1575,59 +1681,89 @@
   padding-top: 16px;
 }
 
-/* 태그 pill 바 */
-.crk-lt-tagbar {
+/* 카테고리(태그) 목록 */
+.crk-lt-categories {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 16px;
-}
-.crk-lt-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 5px 12px;
-  border-radius: 20px;
-  font-size: 12.5px;
-  font-weight: 600;
-  border: 1px solid var(--outline_tertiary, rgba(0,0,0,.12));
-  background: none;
-  color: var(--text_secondary, #555);
-  cursor: pointer;
-  transition: background .12s, color .12s, border-color .12s;
-  font-family: inherit;
-}
-.crk-lt-pill:hover {
-  background: rgba(245,197,24,.08);
-  border-color: rgba(245,197,24,.35);
-  color: var(--crk-gold);
-}
-.crk-lt-pill-active {
-  background: rgba(245,197,24,.13) !important;
-  border-color: rgba(245,197,24,.5) !important;
-  color: var(--crk-gold) !important;
-}
-.crk-lt-pill-count {
-  font-size: 11px;
-  font-weight: 700;
-  opacity: .75;
+  flex-direction: column;
+  gap: 8px;
 }
 
-/* 카드 그리드 — 플랫폼 gap-x-2(8px) / gap-y-10(40px) 일치 */
+/* 카테고리 한 칸 — 좋아요 페이지 폴더 카드와 유사한 톤 */
+.crk-lt-cat {
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+/* 카테고리 헤더 — 클릭으로 접기/펼치기 */
+.crk-lt-cat-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--bg_secondary, rgba(0,0,0,.03));
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  transition: background .12s;
+}
+.crk-lt-cat-header:hover {
+  background: rgba(245,166,35,.10);
+}
+.crk-lt-cat-chevron {
+  flex-shrink: 0;
+  color: var(--text_tertiary, #999);
+  transition: transform .18s ease;
+  transform: rotate(0deg);
+}
+.crk-lt-cat-chevron-open {
+  transform: rotate(90deg);
+}
+.crk-lt-cat-name {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--crk-gold, #f5a623);
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.crk-lt-cat-count {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text_tertiary, #aaa);
+  background: rgba(0,0,0,.06);
+  border-radius: 10px;
+  padding: 2px 8px;
+  flex-shrink: 0;
+}
+
+/* 카테고리 본문 (카드 그리드 영역) */
+.crk-lt-cat-body {
+  padding: 14px 4px 18px;
+}
+
+/* 카드 그리드 — 카드 폭(164.8px) 기준 자동 줄바꿈.
+   3~5열 고정 대신 auto-fill로 패널 폭에 맞게 자연스럽게 배치 */
 .crk-lt-grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  column-gap: 8px;
-  row-gap: 40px;
+  grid-template-columns: repeat(auto-fill, 164.8px);
+  column-gap: 12px;
+  row-gap: 24px;
+  justify-content: start;
 }
-@media (max-width: 640px) {
-  .crk-lt-grid { grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 480px) {
+  .crk-lt-grid { grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); }
 }
 
-/* 카드 공통 — 플랫폼 카드는 border/shadow 없음, rounded-lg(8px) */
+/* 카드 공통 — 요청 치수: 썸네일 164.8×247.19px, 정보영역 164.8×88.22px */
 .crk-lt-card {
   display: flex;
   flex-direction: column;
+  width: 164.8px;
   border-radius: 8px;
   overflow: hidden;
   cursor: pointer;
@@ -1642,10 +1778,9 @@
   outline-offset: 2px;
 }
 
-/* 썸네일 — 플랫폼 aspect-[2/3] 일치 */
 .crk-lt-thumb {
-  width: 100%;
-  aspect-ratio: 2/3;
+  width: 164.8px;
+  height: 247.19px;
   overflow: hidden;
   background: rgba(0,0,0,.05);
   flex-shrink: 0;
@@ -1658,12 +1793,17 @@
   display: block;
 }
 
-/* 카드 정보 영역 — 플랫폼 flex-col gap-1(4px), padding 최소화 */
+/* 카드 정보 영역 — 164.8×88.22px 고정 (50.59px에서 상하 여유 37.63px 확장,
+   제목 2줄 + 작가명 + 대화수가 잘리지 않고 들어갈 수 있도록) */
 .crk-lt-info {
+  width: 164.8px;
+  height: 88.22px;
   padding: 6px 2px 0;
   display: flex;
   flex-direction: column;
   gap: 4px;
+  box-sizing: border-box;
+  overflow: hidden;
 }
 .crk-lt-title {
   font-size: 14px;
@@ -1691,8 +1831,10 @@
   margin: 0;
 }
 
-/* 썸네일 없는 카드 */
-.crk-lt-card-noimg {
+/* 썸네일 없는 카드 — 정보영역 고정 높이를 넘어가도 되도록 별도 처리
+   (제목 + 안내문구로 88.22px를 초과할 수 있어 auto 높이 허용) */
+.crk-lt-card-noimg .crk-lt-info {
+  height: auto;
   min-height: 80px;
   justify-content: center;
 }
@@ -1702,7 +1844,6 @@
   font-style: italic;
   margin: 4px 0 0;
 }
-/* 썸네일 미수집 카드 힌트 텍스트 업데이트 (window.open 새탭 방식) */
 
 /* 빈 상태 메시지 */
 .crk-lt-empty {
@@ -1716,14 +1857,13 @@
 
 /* 다크 모드 */
 @media (prefers-color-scheme: dark) {
+  #crk-liked-tabs { background: var(--bg_screen, #0e0e14); }
   .crk-lt-tab:hover { background: rgba(255,255,255,.05); color: var(--text_primary, #eee); }
-  .crk-lt-pill {
-    border-color: rgba(255,255,255,.12);
-    color: var(--text_secondary, #aaa);
-  }
+  .crk-lt-cat-header { background: rgba(255,255,255,.05); }
+  .crk-lt-cat-header:hover { background: rgba(245,166,35,.12); }
+  .crk-lt-cat-count { background: rgba(255,255,255,.10); }
   .crk-lt-card {
     background: var(--bg_elevated_primary, #1a1a28);
-    border-color: rgba(255,255,255,.07);
   }
   .crk-lt-card:hover { box-shadow: 0 6px 20px rgba(0,0,0,.35); }
   .crk-lt-title { color: var(--text_primary, #eee); }
