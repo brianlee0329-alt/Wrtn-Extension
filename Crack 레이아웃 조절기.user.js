@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crack 레이아웃 조절기
 // @namespace    https://github.com/local/crack-layout
-// @version      1.5.6
+// @version      1.5.9
 // @description  채팅창 너비 조절 + 컴팩트 모드
 // @author       Tyme
 // @match        https://crack.wrtn.ai/stories/*
@@ -14,21 +14,157 @@
     'use strict';
 
     // =========================================================================
-    //  설정
+    //  ① 스크롤 차단 — 조기 실행 구역 (document-start 시점)
+    //
+    //  원본: 채팅 강제 스크롤 차단 v1.0.0
+    //  변경:
+    //    · setInterval(syncScroll, 6) → requestAnimationFrame 루프로 교체
+    //      이전 구조의 문제: 6ms 인터벌은 프레임 주기(~16ms)보다 짧아 메인 스레드에
+    //      매 프레임 2~3회 불필요한 콜백을 쌓았음.
+    //      rAF는 브라우저 렌더 파이프라인에 동기화되어 프레임당 정확히 1회만 실행되고,
+    //      탭 비활성 시 자동으로 throttle되어 GC 압력도 함께 해소됨.
+    //    · 락 활성 구간에서만 루프 실행 → 유휴 상태에서 rAF 프레임 소비 없음
+    //    · isStoryPage() → URL 패턴 캐싱으로 반복 호출 최적화
     // =========================================================================
+
+    let lastUserPos   = 0;
+    let isLocked      = false;
+    let clearTimer    = null;
+    let startY        = 0;
+    let rafHandle     = null;  // rAF 루프 핸들
+
+    const isStoryPage = () => window.location.pathname.startsWith('/stories/');
+
+    // '진짜 채팅창'만 정밀 타겟팅
+    const getChatScroller = () => {
+        if (!isStoryPage()) return null;
+        const msgNode = document.querySelector('[data-message-group-id]');
+        if (msgNode) return msgNode.closest('.overflow-y-auto');
+        const flexScroller = document.querySelector('.overflow-y-auto.flex-col-reverse');
+        if (flexScroller) return flexScroller;
+        return null;
+    };
+
+    // ── rAF 기반 스크롤 동기화 루프 ──────────────────────────────────────────
+    // 락이 활성화된 동안만 루프가 살아 있음.
+    // 락 해제(isLocked = false) 시 cancelAnimationFrame으로 즉시 종료.
+    function syncScrollFrame() {
+        if (!isLocked) {
+            rafHandle = null;
+            return; // 락 해제 → 루프 종료
+        }
+        const el = getChatScroller();
+        if (el && el.scrollTop !== lastUserPos) {
+            el.scrollTop = lastUserPos;
+        }
+        rafHandle = requestAnimationFrame(syncScrollFrame);
+    }
+
+    function startDefense() {
+        // 이미 rAF 루프가 살아 있으면 중복 시작 방지
+        if (!rafHandle) {
+            rafHandle = requestAnimationFrame(syncScrollFrame);
+        }
+
+        // 기존 clearTimer 갱신: 마지막 사용자 동작으로부터 3초 후 락 해제
+        if (clearTimer) clearTimeout(clearTimer);
+        clearTimer = setTimeout(() => {
+            isLocked  = false;
+            clearTimer = null;
+            // rAF 루프는 syncScrollFrame 내부에서 isLocked 체크 후 자체 종료
+        }, 3000);
+    }
+
+    const handleUserAction = (e, delta) => {
+        if (!isStoryPage()) return;
+        const el = getChatScroller();
+        if (!el) return;
+        if (!el.contains(e.target) && el !== e.target) return;
+
+        if (delta < 0 || Math.abs(el.scrollTop) > 20) {
+            isLocked    = true;
+            lastUserPos = el.scrollTop;
+            startDefense();
+        } else {
+            isLocked = false;
+        }
+    };
+
+    window.addEventListener('wheel', (e) => handleUserAction(e, e.deltaY),   { passive: true, capture: true });
+    window.addEventListener('touchstart', (e) => { startY = e.touches[0].pageY; }, { passive: true });
+    window.addEventListener('touchmove',  (e) => {
+        handleUserAction(e, startY - e.touches[0].pageY);
+    }, { passive: true, capture: true });
+
+    // 포커스 이동 시 강제 스크롤 차단 (채팅 영역 내에서만)
+    const originalFocus = HTMLElement.prototype.focus;
+    HTMLElement.prototype.focus = function (arg) {
+        const chatEl = getChatScroller();
+        if (isStoryPage() && isLocked && chatEl && chatEl.contains(this)) {
+            const options = (typeof arg === 'object') ? arg : {};
+            options.preventScroll = true;
+            originalFocus.call(this, options);
+        } else {
+            originalFocus.apply(this, arguments);
+        }
+    };
+
+    // 브라우저 자체 스크롤 자동 보정 비활성화
+    const injectAntiScrollStyle = () => {
+        if (document.getElementById('anti-scroll-style-stealth')) return;
+        const style = document.createElement('style');
+        style.id = 'anti-scroll-style-stealth';
+        style.innerHTML = `.flex-col-reverse * { overflow-anchor: none !important; scroll-behavior: auto !important; }`;
+        (document.head || document.documentElement).appendChild(style);
+    };
+    injectAntiScrollStyle();
+    window.addEventListener('DOMContentLoaded', injectAntiScrollStyle);
+
+    // 채팅방을 벗어나면 방어막 즉시 해제
+    // ※ 원본의 500ms setInterval은 유지 (단순 플래그 토글, GC 부하 미미)
+    setInterval(() => {
+        if (!isStoryPage()) isLocked = false;
+    }, 500);
+
+
+    // =========================================================================
+    //  ② 레이아웃 조절기 — 지연 실행 구역 (DOM 준비 후)
+    //
+    //  원본: Crack 레이아웃 조절기 v1.5.6
+    //  변경(v1.5.8):
+    //    · isBreaker()에 .wrtn-markdown-table(표 블럭) 추가
+    //      → 컴팩트 모드에서 표가 이미지 옆 textEls로 끼어들지 않고
+    //        인용문/코드블럭과 동일하게 .ck-group 바깥으로 분리되어 독립 행을 차지
+    //    · 표 자체는 margin:0 auto로 중앙 정렬 (콘텐츠 폭보다 좁을 때 좌측 쏠림 방지)
+    //    · 웹 모달 3종(대화 프로필 / 유저노트 / 최대 출력량 조절) 너비 슬라이더 추가
+    //      → 대화 프로필: HTML width="444px" 속성 selector (해시 클래스 비의존)
+    //      → 유저노트: .max-w-lg + :has(textarea)로 동일 프리셋 다이얼로그와 구분
+    //      → 최대 출력량 조절: .max-w-\[444px\].max-h-\[85dvh\] 조합 매칭
+    //  변경(v1.5.9):
+    //    · 프로필/출력량 조절 모달 슬라이더 범위 확장 (360~680 → 360~900, 기본 444 동일)
+    //    · 두 모달 내부 블록을 :has()+grid-template-columns: auto-fit/minmax로
+    //      "충분한 너비가 되면 자동 2열(1,2 / 3,4) reflow" 처리
+    //      (모달 폭이 좁으면 1열 유지, 슬라이더로 넓히면 자연스럽게 2열로 전환 — 별도 breakpoint 불필요)
+    // =========================================================================
+
+    // ── 설정 ─────────────────────────────────────────────────────────────────
     const CFG = {
-        chatWidth:   GM_getValue('ck_chatWidth',   768),
-        compactMode: GM_getValue('ck_compactMode', false),
+        chatWidth:     GM_getValue('ck_chatWidth',     768),
+        compactMode:   GM_getValue('ck_compactMode',   false),
+        profileWidth:  GM_getValue('ck_profileWidth',  444),
+        userNoteWidth: GM_getValue('ck_userNoteWidth', 512),
+        outputWidth:   GM_getValue('ck_outputWidth',   444),
     };
 
     function save() {
-        GM_setValue('ck_chatWidth',   CFG.chatWidth);
-        GM_setValue('ck_compactMode', CFG.compactMode);
+        GM_setValue('ck_chatWidth',     CFG.chatWidth);
+        GM_setValue('ck_compactMode',   CFG.compactMode);
+        GM_setValue('ck_profileWidth',  CFG.profileWidth);
+        GM_setValue('ck_userNoteWidth', CFG.userNoteWidth);
+        GM_setValue('ck_outputWidth',   CFG.outputWidth);
     }
 
-    // =========================================================================
-    //  CSS 주입
-    // =========================================================================
+    // ── CSS 주입 ──────────────────────────────────────────────────────────────
     function injectCSS() {
         const ID = 'ck-layout-style';
         const el = document.getElementById(ID) || (() => {
@@ -48,10 +184,7 @@
             div.max-w-\\[816px\\] {
                 max-width: ${CFG.chatWidth}px !important;
             }
-            /* ── 콘텐츠 이미지 높이 제한 ────────────────────────────────────
-               너비 기준 → 높이 기준으로 전환 (440px).
-               세로로 긴 이미지가 너비는 같아도 칸을 과도하게 늘리는 문제 해소.
-            ────────────────────────────────────────────────────────────────────── */
+            /* ── 콘텐츠 이미지 높이 제한 ── */
             div.max-w-\\[768px\\] img {
                 max-height: 440px !important;
                 width: auto !important;
@@ -80,11 +213,7 @@
                 width: revert !important;
                 height: revert !important;
             }
-            /* ── 원형 아바타 보호 (Tailwind w-6 h-6 클래스 기반 크기) ──
-               플랫폼이 아바타 크기를 HTML attribute → Tailwind 클래스로 전환하면서
-               전역 width/height:auto 규칙이 w-6 h-6 을 덮어쓰는 문제 해소.
-               rounded-full 은 아바타/아이콘 전용 클래스이므로 안전하게 고정 가능.
-            ─────────────────────────────────────────────────────────────────── */
+            /* ── 원형 아바타 보호 ── */
             div.max-w-\\[768px\\] img.rounded-full {
                 max-height: none !important;
                 max-width: none !important;
@@ -92,30 +221,7 @@
                 height: 1.5rem !important;
             }
 
-            /* ── 컴팩트 모드: 그룹 BFC float ────────────────────────────────────
-               핵심 원리:
-                 이미지 단락들을 "그룹 컨테이너"로 묶은 뒤, 각 컨테이너에
-                 overflow:hidden(= BFC 생성)을 적용.
-
-                 BFC(Block Formatting Context)는 내부 float을 외부로 누출시키지
-                 않으므로, IMG A 그룹의 텍스트가 IMG B 구간으로 흘러내리는 현상이
-                 발생하지 않음. 각 그룹이 독립된 레이아웃 컨텍스트를 형성:
-
-                 ┌─ .ck-group (overflow:hidden) ────────────────────────┐
-                 │ ┌────────┐  텍스트가 이미지 우측 상단부터 시작        │
-                 │ │ IMG A  │  이미지보다 길면 이미지 하단으로 흘러내림   │
-                 │ └────────┘  (BFC 벽에서 멈춤)                        │
-                 └──────────────────────────────────────────────────────┘
-                 ┌─ .ck-group (overflow:hidden) ────────────────────────┐
-                 │ ┌────────┐  다음 그룹은 이전 그룹과 완전히 분리       │
-                 │ │ IMG B  │                                            │
-                 │ └────────┘                                            │
-                 └──────────────────────────────────────────────────────┘
-
-               .ck-group        : BFC 컨테이너. overflow:hidden이 핵심.
-               .ck-group-img    : float:left 이미지 단락.
-               .ck-group-img img: 그룹 너비의 45%를 꽉 채움.
-            ──────────────────────────────────────────────────────────────── */
+            /* ── 컴팩트 모드: 그룹 BFC float ── */
             .ck-group {
                 overflow: hidden;
                 margin-bottom: 8px;
@@ -134,18 +240,7 @@
                 display: block !important;
             }
 
-            /* ── 컴팩트 모드: 이미지-텍스트 상단 정렬 보정 ─────────────────────────
-               크랙은 이미지 <span>에 pt-5(padding-top:1.25rem=20px)를 적용한다.
-               float box 내에서 실제 이미지 픽셀이 20px 아래서 시작하므로,
-               우측 텍스트 첫 문단(y=0 시작)보다 이미지가 낮아 보이는 문제 해소.
-               → .ck-group-img 안의 pt-5 패딩 제거 + 첫 텍스트 요소 margin-top 제거
-
-               h1~h6 포함 이유:
-               마크다운 ## / ### 등이 렌더링된 헤딩 요소가 이미지 직후 첫 번째로
-               올 경우, 브라우저 기본 헤딩 margin-top이 그대로 적용되어 이미지
-               상단과 텍스트 상단이 어긋나는 정렬 파괴 현상이 발생한다.
-               → 헤딩도 <p>와 동일하게 margin-top 0 으로 처리.
-            ────────────────────────────────────────────────────────────────────── */
+            /* ── 컴팩트 모드: 이미지-텍스트 상단 정렬 보정 ── */
             .ck-group-img .pt-5 {
                 padding-top: 0 !important;
             }
@@ -157,6 +252,43 @@
             .ck-group-img + h5,
             .ck-group-img + h6 {
                 margin-top: 0 !important;
+            }
+
+            /* ── 표 블럭: breaker 분리 후 폭이 좁을 때 중앙 정렬 ── */
+            .wrtn-markdown-table {
+                margin: 8px 0 !important;
+            }
+            .wrtn-markdown-table table {
+                margin: 0 auto !important;
+            }
+
+            /* ── 대화 프로필 모달 너비 (HTML width 속성 selector, 해시 클래스 비의존) ── */
+            #web-modal div[width="444px"] {
+                width: ${CFG.profileWidth}px !important;
+                max-width: ${CFG.profileWidth}px !important;
+            }
+            /* ── 유저노트 모달 너비 (.max-w-lg 프리셋 중 textarea 포함된 것만 한정) ── */
+            div[role="dialog"].max-w-lg:has(textarea) {
+                max-width: ${CFG.userNoteWidth}px !important;
+            }
+            /* ── 최대 출력량 조절 모달 너비 ── */
+            div[role="dialog"][class*="max-w-[444px]"][class*="max-h-[85dvh]"] {
+                max-width: ${CFG.outputWidth}px !important;
+            }
+
+            /* ── 대화 프로필 모달: 카드 블럭 자동 2열 grid (좁으면 1열 유지) ── */
+            #web-modal div:has(> div[cursor="pointer"]) {
+                display: grid !important;
+                grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)) !important;
+                gap: 10px 14px !important;
+            }
+
+            /* ── 최대 출력량 조절 모달: 모델별 블럭 자동 2열 grid ── */
+            div[role="dialog"][class*="max-w-[444px]"][class*="max-h-[85dvh]"]
+                div.flex.flex-col:has(> div.flex.flex-col.gap-4.py-6) {
+                display: grid !important;
+                grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)) !important;
+                gap: 0 20px !important;
             }
 
             /* ── 패널 슬라이더 공통 ── */
@@ -187,36 +319,11 @@
         `;
     }
 
-    // =========================================================================
-    //  컴팩트 모드: DOM 그룹화 / 복구
-    //
-    //  변환 전 (.wrtn-markdown 내부):
-    //    <p><span><img class="rounded-lg"></span></p>   ← 이미지 단락
-    //    <p>텍스트 A</p>
-    //    <p>텍스트 B</p>
-    //    <p><span><img class="rounded-lg"></span></p>   ← 이미지 단락
-    //    <p>텍스트 C</p>
-    //
-    //  변환 후:
-    //    <div class="ck-group">
-    //      <p class="ck-group-img">...</p>              ← float:left
-    //      <p>텍스트 A</p>                               ← BFC 안에서 우측으로 흐름
-    //      <p>텍스트 B</p>
-    //    </div>                                         ← overflow:hidden이 float 차단
-    //    <div class="ck-group">
-    //      <p class="ck-group-img">...</p>
-    //      <p>텍스트 C</p>
-    //    </div>
-    //
-    //  복구: data-ck-orig 에 원래 outerHTML을 저장해두고 그대로 교체.
-    //  → React 가상 DOM과 충돌 우려가 있으므로, 복구 시 innerHTML 교체 방식 사용.
-    // =========================================================================
+    // ── 컴팩트 모드: DOM 그룹화 / 복구 ──────────────────────────────────────
 
     function isImgParagraph(el) {
         if (el.tagName !== 'P') return false;
         if (!el.querySelector('img.rounded-lg')) return false;
-        // 이미지 컨테이너를 제거한 뒤 잔여 텍스트가 없어야 순수 이미지 단락으로 판정.
-        // 텍스트가 남으면 혼합 단락 → isImgParagraph = false (splitMixedParagraph로 처리)
         const clone = el.cloneNode(true);
         let container = clone.querySelector('img.rounded-lg');
         while (container.parentElement && container.parentElement !== clone) {
@@ -226,9 +333,6 @@
         return clone.textContent.trim().length === 0;
     }
 
-    /**
-     * 이미지와 텍스트가 동일 <p> 안에 혼재하는 "혼합 단락" 판별.
-     */
     function isMixedImgParagraph(el) {
         if (el.tagName !== 'P') return false;
         if (!el.querySelector('img.rounded-lg')) return false;
@@ -241,28 +345,10 @@
         return clone.textContent.trim().length > 0;
     }
 
-    /**
-     * 혼합 단락을 [before-p?, img-p, after-p?] 로 분리하여 반환.
-     *
-     * 변환 전:
-     *   <p>
-     *     <em>텍스트A</em>
-     *     <span class="pt-5 block"><img class="rounded-lg"></span>
-     *     <strong>GM|</strong> 텍스트B
-     *   </p>
-     *
-     * 변환 후:
-     *   <p><em>텍스트A</em></p>                     ← before (standalone)
-     *   <p><span class="block"><img ...></span></p>  ← img (pt-5 제거됨)
-     *   <p><strong>GM|</strong> 텍스트B</p>          ← after (textEls로 wrap)
-     *
-     * pt-5 제거: float box 안에서 이미지가 padding 없이 최상단부터 시작하도록 보정.
-     */
     function splitMixedParagraph(p) {
         const img = p.querySelector('img.rounded-lg');
         if (!img) return [p];
 
-        // img의 직계 부모를 p까지 타고 올라가 p의 직접 자식 컨테이너를 찾는다
         let imgContainer = img;
         while (imgContainer.parentElement && imgContainer.parentElement !== p) {
             imgContainer = imgContainer.parentElement;
@@ -273,16 +359,11 @@
         let found = false;
 
         for (const child of Array.from(p.childNodes)) {
-            if (child === imgContainer) {
-                found = true;
-                continue;
-            }
+            if (child === imgContainer) { found = true; continue; }
             if (!found) {
-                // 이미지 앞 공백 전용 텍스트 노드는 생략
                 if (child.nodeType === Node.TEXT_NODE && child.textContent.trim() === '') continue;
                 beforeNodes.push(child.cloneNode(true));
             } else {
-                // 이미지 뒤 선행 공백 전용 텍스트 노드는 생략
                 if (!afterNodes.length && child.nodeType === Node.TEXT_NODE && child.textContent.trim() === '') continue;
                 afterNodes.push(child.cloneNode(true));
             }
@@ -296,27 +377,18 @@
             result.push(bp);
         }
 
-        // 이미지 단락: pt-5 제거로 float 상단 정렬 보정
         const imgP = document.createElement('p');
         const imgClone = imgContainer.cloneNode(true);
-        imgClone.classList.remove('pt-5');   // padding-top 제거 (px 보정은 CSS에서 처리)
+        imgClone.classList.remove('pt-5');
         imgP.appendChild(imgClone);
         result.push(imgP);
 
         if (afterNodes.length) {
             const ap = document.createElement('p');
             afterNodes.forEach((n, i) => {
-                // ── 첫 번째 텍스트 노드의 선행 \n 제거 ─────────────────────────────
-                // 크랙 wrtn-markdown은 white-space:pre-wrap 이므로 텍스트 노드에
-                // 남아 있는 선행 \n 이 실제 빈 줄로 렌더된다.
-                // 평문 텍스트는 이미지 span과 같은 노드 내에서 "\n텍스트" 형태의
-                // 단일 텍스트 노드로 들어오기 때문에, trim() !== '' 조건을 통과해
-                // 선행 \n 이 그대로 afterP 에 포함된다.
-                // (서식 있는 텍스트는 \n 전용 노드와 <strong>/<em> 이 분리 수록되어
-                //  \n 전용 노드는 위의 "공백 전용 건너뜀" 로직에서 이미 걸러진다.)
                 if (i === 0 && n.nodeType === Node.TEXT_NODE) {
                     const cleaned = n.textContent.replace(/^\n+/, '');
-                    if (cleaned.length === 0) return; // 내용 없으면 노드 자체 생략
+                    if (cleaned.length === 0) return;
                     ap.appendChild(document.createTextNode(cleaned));
                 } else {
                     ap.appendChild(n);
@@ -328,27 +400,21 @@
         return result;
     }
 
-    /**
-     * 코드블럭(.wrtn-codeblock div)·인용문(blockquote)을 그룹 구분자로 판별.
-     * 이 요소들은 독립 블럭으로 배치되어 float 흐름에 포함되지 않음.
-     */
     function isBreaker(el) {
         return el.tagName === 'BLOCKQUOTE' ||
-               (el.tagName === 'DIV' && el.classList.contains('wrtn-codeblock'));
+               el.tagName === 'TABLE' ||
+               (el.tagName === 'DIV' && (
+                   el.classList.contains('wrtn-codeblock') ||
+                   el.classList.contains('wrtn-markdown-table')
+               ));
     }
 
     function applyCompact(md) {
         if (md.dataset.ckCompact === '1') return;
-
-        // 복구를 위해 원본 HTML 저장
-        md.dataset.ckOrig = md.innerHTML;
+        md.dataset.ckOrig    = md.innerHTML;
         md.dataset.ckCompact = '1';
 
         const children = Array.from(md.children);
-
-        // ── 전처리: 혼합 단락(이미지+텍스트 공존 <p>)을 분리 ──────────────────
-        // isImgParagraph 가 false를 반환하는 혼합 단락을 [before, img, after] 로
-        // 쪼개어 일반 자식 배열로 편입한 뒤 기존 그룹화 로직을 그대로 적용.
         const expandedChildren = [];
         for (const child of children) {
             if (isMixedImgParagraph(child)) {
@@ -357,42 +423,27 @@
                 expandedChildren.push(child);
             }
         }
-        // ──────────────────────────────────────────────────────────────────────
 
-        // 출력 목록: { type: 'group'|'standalone', ... }
-        // group   : { imgEl, textEls[], breakerEls[] }
-        //   - textEls   : 이미지 옆에서 wrap될 일반 <p> 단락들
-        //   - breakerEls: 그룹 하단에 full-width로 배치될 코드블럭·인용문
-        //     (텍스트 사이에 낀 breaker도 모두 textEls 수집이 끝난 뒤 하단에 몰아 배치)
         const output = [];
         let i = 0;
 
-        // 첫 이미지 이전 요소 → standalone
         while (i < expandedChildren.length && !isImgParagraph(expandedChildren[i])) {
             output.push({ type: 'standalone', el: expandedChildren[i] });
             i++;
         }
 
-        // 이미지 단위로 그룹 생성
         while (i < expandedChildren.length) {
             if (isImgParagraph(expandedChildren[i])) {
                 const imgEl      = expandedChildren[i];
-                const textEls    = [];   // 이미지 옆 wrap 텍스트
-                const breakerEls = [];   // 그룹 하단 독립 블럭
+                const textEls    = [];
+                const breakerEls = [];
                 i++;
 
-                // 다음 이미지 단락 전까지 수집
-                // · <hr>      → breakerEls에 추가 후 즉시 루프 종료 (그룹 구분자)
-                //               <hr> 이후 요소는 다음 그룹 or standalone으로 처리됨
-                // · isBreaker → breakerEls 큐에 적재 (하단에 몰아 배치)
-                // · 일반 <p>  → textEls에 추가
-                // ※ breaker 이후에 오는 <p>도 textEls에 계속 추가.
-                //   이렇게 해야 "텍스트와 텍스트 사이에 코드블럭 삽입" 현상이 사라짐.
                 while (i < expandedChildren.length && !isImgParagraph(expandedChildren[i])) {
                     if (expandedChildren[i].tagName === 'HR') {
                         breakerEls.push(expandedChildren[i]);
                         i++;
-                        break; // <hr>을 그룹 종료 구분자로 처리
+                        break;
                     } else if (isBreaker(expandedChildren[i])) {
                         breakerEls.push(expandedChildren[i]);
                     } else {
@@ -410,23 +461,17 @@
 
         if (!output.some(o => o.type === 'group')) return;
 
-        // md 비우고 재구성
         md.innerHTML = '';
-
         output.forEach(item => {
             if (item.type === 'group') {
-                // ck-group: 이미지(float) + wrap 텍스트
                 const wrapper = document.createElement('div');
                 wrapper.className = 'ck-group';
                 item.imgEl.classList.add('ck-group-img');
-                // 순수 이미지 단락의 pt-5도 제거 (상단 정렬 보정)
                 const pt5 = item.imgEl.querySelector('.pt-5');
                 if (pt5) pt5.classList.remove('pt-5');
                 wrapper.appendChild(item.imgEl);
                 item.textEls.forEach(el => wrapper.appendChild(el));
                 md.appendChild(wrapper);
-
-                // 그룹 하단에 코드블럭·인용문을 full-width로 배치
                 item.breakerEls.forEach(el => md.appendChild(el));
             } else {
                 md.appendChild(item.el);
@@ -436,9 +481,7 @@
 
     function restoreCompact(md) {
         if (md.dataset.ckCompact !== '1') return;
-        if (md.dataset.ckOrig) {
-            md.innerHTML = md.dataset.ckOrig;
-        }
+        if (md.dataset.ckOrig) md.innerHTML = md.dataset.ckOrig;
         delete md.dataset.ckCompact;
         delete md.dataset.ckOrig;
     }
@@ -446,9 +489,7 @@
     function applyCompactAll()  { document.querySelectorAll('.wrtn-markdown').forEach(applyCompact); }
     function removeCompactAll() { document.querySelectorAll('.wrtn-markdown[data-ck-compact]').forEach(restoreCompact); }
 
-    // =========================================================================
-    //  플로팅 UI 생성
-    // =========================================================================
+    // ── 플로팅 UI ─────────────────────────────────────────────────────────────
     function buildUI() {
         if (document.getElementById('ck-fab')) return;
 
@@ -457,7 +498,7 @@
         fab.title = '레이아웃 조절';
         fab.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 3H3"/><path d="M21 21H3"/><path d="M6 12H18"/><path d="M15 8l3 4-3 4"/><path d="M9 8L6 12l3 4"/></svg>`;
         Object.assign(fab.style, {
-            position:'fixed', bottom:'80px', right:'80px', zIndex:'99998',
+            position:'fixed', bottom:'80px', right:'80px', zIndex:'999',
             width:'40px', height:'40px', display:'flex',
             alignItems:'center', justifyContent:'center',
             borderRadius:'50%', background:'#242321',
@@ -471,7 +512,7 @@
         const panel = document.createElement('div');
         panel.id = 'ck-panel';
         Object.assign(panel.style, {
-            position:'fixed', bottom:'130px', right:'68px', zIndex:'99997',
+            position:'fixed', bottom:'130px', right:'68px', zIndex:'999',
             width:'220px', background:'#1E1D1C',
             border:'1px solid #3a3835', borderRadius:'12px',
             padding:'16px', boxShadow:'0 8px 24px rgba(0,0,0,0.6)',
@@ -518,6 +559,38 @@
         panel.appendChild(wRow); panel.appendChild(wSlider);
         panel.appendChild(makeHr());
 
+        // 대화 프로필 모달 너비
+        const { row: pRow, val: pVal } = makeRow('프로필 모달 너비', CFG.profileWidth + 'px');
+        const pSlider = makeSlider(360, 840, 20, CFG.profileWidth);
+        pSlider.addEventListener('input', () => {
+            CFG.profileWidth = parseInt(pSlider.value, 10);
+            pVal.textContent = CFG.profileWidth + 'px';
+            save(); injectCSS();
+        });
+        panel.appendChild(pRow); panel.appendChild(pSlider);
+
+        // 유저노트 모달 너비
+        const { row: nRow, val: nVal } = makeRow('유저노트 모달 너비', CFG.userNoteWidth + 'px');
+        const nSlider = makeSlider(400, 840, 20, CFG.userNoteWidth);
+        nSlider.addEventListener('input', () => {
+            CFG.userNoteWidth = parseInt(nSlider.value, 10);
+            nVal.textContent = CFG.userNoteWidth + 'px';
+            save(); injectCSS();
+        });
+        panel.appendChild(nRow); panel.appendChild(nSlider);
+
+        // 최대 출력량 조절 모달 너비
+        const { row: oRow, val: oVal } = makeRow('출력량 모달 너비', CFG.outputWidth + 'px');
+        const oSlider = makeSlider(360, 840, 20, CFG.outputWidth);
+        oSlider.addEventListener('input', () => {
+            CFG.outputWidth = parseInt(oSlider.value, 10);
+            oVal.textContent = CFG.outputWidth + 'px';
+            save(); injectCSS();
+        });
+        panel.appendChild(oRow); panel.appendChild(oSlider);
+
+        panel.appendChild(makeHr());
+
         // 컴팩트 모드 토글
         const compactRow = document.createElement('div');
         compactRow.style.cssText = 'display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;';
@@ -557,6 +630,9 @@
         resetBtn.addEventListener('mouseleave', () => { resetBtn.style.background = 'rgba(255,185,56,0.08)'; });
         resetBtn.addEventListener('click', () => {
             CFG.chatWidth = 768; wSlider.value = 768; wVal.textContent = '768px';
+            CFG.profileWidth = 444; pSlider.value = 444; pVal.textContent = '444px';
+            CFG.userNoteWidth = 512; nSlider.value = 512; nVal.textContent = '512px';
+            CFG.outputWidth = 444; oSlider.value = 444; oVal.textContent = '444px';
             if (CFG.compactMode) {
                 removeCompactAll();
                 CFG.compactMode = false; toggleInput.checked = false;
@@ -591,9 +667,7 @@
         document.body.appendChild(panel);
     }
 
-    // =========================================================================
-    //  초기화
-    // =========================================================================
+    // ── 초기화 ───────────────────────────────────────────────────────────────
     function init() {
         injectCSS();
         buildUI();
@@ -607,7 +681,12 @@
     }
 
     // =========================================================================
-    //  MutationObserver: SPA 라우팅 + 새 메시지 감지
+    //  ③ 통합 MutationObserver
+    //
+    //  원본 레이아웃 조절기의 MutationObserver와 스크롤 차단의 별도 감시를 하나로 통합.
+    //  · SPA 라우팅 감지 → injectCSS 재실행
+    //  · 컴팩트 모드 활성 시 새 .wrtn-markdown 감지 → applyCompactAll
+    //  스크롤 차단은 이벤트 리스너 기반이므로 Observer 추가 항목 없음.
     // =========================================================================
     let lastHref = location.href;
     let mdTimer  = null;
