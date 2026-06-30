@@ -1107,7 +1107,7 @@ GM_addStyle(`
         onTrigger: (node) => {
           ModalManager.getOrCreateManager("c2").getOpened()?.__contentPanel?.runModifyVerification();
           node.setAttribute("disabled", "true");
-          document.getElementById("chasm-ignt-llm-timer")?.setAttribute("current-flow", "0");
+          _startTimer();
           appendBurnerLog("이그나이터 프로세스 시작..");
           startProcess()
             .catch((err) => {
@@ -1119,11 +1119,7 @@ GM_addStyle(`
             })
             .finally(() => {
               node.removeAttribute("disabled");
-              const timer = document.getElementById("chasm-ignt-llm-timer");
-              if (timer) {
-                timer.setAttribute("current-flow", "-1");
-                timer.textContent = "00:00";
-              }
+              _stopTimer();
             });
         },
       });
@@ -1673,32 +1669,88 @@ GM_addStyle(`
     setupModal();
   }, 1);
 
-  setInterval(() => {
-    for (let node of document.getElementsByClassName("chasm-ignt-time-ticker")) {
-      let flow = parseInt(node.getAttribute("current-flow") ?? "0");
-      if (flow !== -1) {
-        node.setAttribute("current-flow", (++flow).toString());
-        const minute = Math.floor(flow / 60);
-        const second = flow - minute * 60;
-        node.textContent = `${minute.toString().padStart(2, "0")}:${second.toString().padStart(2, "0")}`;
-      }
+  /* =====================================================
+     타이머 틱 — GC 최적화 (CRAK-IGNT-v1.7.0)
+     =====================================================
+     기존 구조의 문제:
+       setInterval 1000ms마다 아래 비용이 무조건 발생했음:
+         1. getElementsByClassName('chasm-ignt-time-ticker')
+            → HTMLCollection 생성 (타이머가 비활성이어도)
+         2. getAttribute('current-flow') → 문자열 파싱
+         3. parseInt() → 숫자 변환
+         4. (++flow).toString() → 신규 문자열 생성
+         5. minute.toString().padStart(2,'0') × 2 → 문자열 2개
+         6. setAttribute('current-flow', ...) → 속성 쓰기
+         7. node.textContent 갱신 → DOM write
+
+     타이머가 -1(비활성) 상태일 때도 1~3번 비용은 항상 발생.
+     AI 응답 대기 중(= 대부분의 시간)에는 실질 작업이 없는데도
+     1초마다 이 사이클이 반복되어 Young Gen 오염의 주요 원인이었음.
+
+     v1.7.0 변경 사항:
+       - 타이머 상태를 DOM 속성이 아닌 JS 변수(_timerFlow)로 관리.
+         DOM 읽기/쓰기 횟수가 tick당 최대 1회(textContent)로 감소.
+       - 비활성 시(_timerFlow === -1): setInterval 콜백이 즉시 return.
+         getElementsByClassName, getAttribute, parseInt 모두 생략.
+       - 활성 시: DOM 노드 참조를 _timerNode에 캐싱.
+         매 tick마다 getElementsByClassName을 호출하지 않음.
+       - 문자열 생성 최적화: padStart 결과를 즉시 템플릿에 삽입
+         (중간 변수 없이 한 번의 템플릿 리터럴로 처리).
+       - setInterval 주기를 1000ms 유지(초 단위 표시 요구사항 충족).
+         단, 500ms 오프셋으로 다른 스크립트의 초기화 피크와 분리.
+       - current-flow 속성은 외부(setupBurnerPage) 코드가 여전히
+         setAttribute로 건드리므로, 그 쪽도 함께 수정해 변수 경유하게.
+  ===================================================== */
+
+  // 타이머 상태 변수 (DOM 속성 대체)
+  // -1: 비활성, 0 이상: 경과 초
+  let _timerFlow = -1;
+  /** @type {Element | null} */
+  let _timerNode = null; // 활성 중 캐싱된 DOM 노드 참조
+
+  /** 타이머 시작: setupBurnerPage의 onTrigger에서 호출 */
+  function _startTimer() {
+    _timerFlow = 0;
+    _timerNode = document.getElementById('chasm-ignt-llm-timer');
+  }
+
+  /** 타이머 정지: finally 블록에서 호출 */
+  function _stopTimer() {
+    _timerFlow = -1;
+    if (_timerNode) {
+      _timerNode.textContent = '00:00';
+      _timerNode = null;
     }
-  }, 1000);
+  }
+
+  setTimeout(() => {
+    setInterval(() => {
+      // 비활성 상태: 모든 DOM 접근 생략 (early return)
+      if (_timerFlow === -1) return;
+
+      _timerFlow++;
+      const m = Math.floor(_timerFlow / 60);
+      const s = _timerFlow - m * 60;
+      // _timerNode가 null이면(DOM이 아직 없음) 한 번만 재탐색
+      if (!_timerNode) {
+        _timerNode = document.getElementById('chasm-ignt-llm-timer');
+        if (!_timerNode) return;
+      }
+      _timerNode.textContent =
+        `${m < 10 ? '0' + m : m}:${s < 10 ? '0' + s : s}`;
+    }, 1000);
+  }, 500);
   const MODEL_MAPPINGS = {
     Google: {
-      "gemini-3-pro-preview": {
-        name: "gemini-3-pro-preview",
-        display: "Gemini 3 Pro (Preview)",
+      "gemini-3.5-flash": {
+        name: "gemini-3.5-flash",
+        display: "Gemini 3.5 Flash",
         requester: GeminiRequester.GENERIC_REQUESTER,
-        warning: "Gemini 3은 2025년 11월 26일 기준으로 무료 티어가 존재하지 않습니다.",
       },
-      "gemini-3-pro-preview-search": {
-        name: "gemini-3-pro-preview",
-        display: "Gemini 3 Pro Search (Preview)",
-        requester: new GeminiRequester((body) => {
-          body.tools = [{ google_search: {} }];
-        }),
-        warning: "Gemini 3은 2025년 11월 26일 기준으로 무료 티어가 존재하지 않습니다.\n 또한 Gemini 3 Pro Search는 구글 검색을 사용하며, 검색 엔진의 입력 토큰도 과금에 포함됩니다.",
+      "gemini-3.1-pro-preview": {
+        name: "gemini-3.1-pro-preview",
+        display: "Gemini 3.1 Pro",
+        requester: GeminiRequester.GENERIC_REQUESTER,
       },
       "gemini-3-flash-preview": {
         name: "gemini-3-flash-preview",
@@ -1733,11 +1785,10 @@ GM_addStyle(`
     },
 
     "Firebase Vertex AI": {
-      "gemini-3-pro-preview": {
-        name: "gemini-3-pro-preview",
-        display: "Gemini 3 Pro (Preview)",
+      "gemini-3.5-flash": {
+        name: "gemini-3.5-flash",
+        display: "Gemini 3.5 Flash",
         requester: FirebaseRequester.GENERIC_REQUESTER,
-        warning: "Gemini 3은 2025년 11월 26일 기준으로 무료 티어가 존재하지 않습니다.",
       },
       "gemini-3-flash-preview": {
         name: "gemini-3-flash-preview",
@@ -1944,9 +1995,31 @@ GM_addStyle(`
   // =================================================
   //                  메뉴 강제 추가
   // =================================================
+  /* __updateModalMenu — GC 최적화 (v1.7.0)
+     문제: chasm-decentral-menu 삽입 성공 이후에도 MutationObserver
+     콜백마다 getElementById × 2 + getElementsByTagName('a') 전수 순회가
+     반복됐음. React 스트리밍 중 DOM 변경이 잦은 구간에서 특히 비용이 큼.
+     window.matchMedia()도 매 콜백마다 신규 MediaQueryList 생성.
+
+     변경:
+       - _menuInjected 플래그: 삽입 완료 후 콜백을 즉시 return.
+         attachObserver의 disconnect 접근 없이 사실상 동일 효과.
+       - _isMobileViewport: matchMedia 결과를 1회 캐싱.
+         화면 크기 변경은 userscript 실행 중 거의 발생하지 않으므로 충분.
+       - 데스크톱 경로(/setting): 루프 내 item 발견 즉시 break (기존 유지).
+       - 모바일 경로(/my-page): 발견 즉시 break 추가 (기존 누락 버그 수정).
+  */
+  let _menuInjected = false;
+  const _isMobileViewport = !window.matchMedia("(min-width: 768px)").matches;
+
   function __updateModalMenu() {
+    // 이미 삽입 완료 → 모든 DOM 접근 생략
+    if (_menuInjected) return;
+    // 삽입된 요소가 DOM에 살아있으면 플래그 복구 (페이지 전환 후 재실행 케이스)
+    if (document.getElementById("chasm-decentral-menu")) { _menuInjected = true; return; }
+
     const modal = document.getElementById("web-modal");
-    if (modal && !document.getElementById("chasm-decentral-menu")) {
+    if (modal) {
       const itemFound = modal.getElementsByTagName("a");
       for (let item of itemFound) {
         if (item.getAttribute("href") === "/setting") {
@@ -1963,11 +2036,12 @@ GM_addStyle(`
               .display(document.body.getAttribute("data-theme") !== "light");
           };
           item.parentElement?.append(clonedElement);
+          _menuInjected = true;
           break;
         }
       }
-    } else if (!document.getElementById("chasm-decentral-menu") && !window.matchMedia("(min-width: 768px)").matches) {
-      // Probably it's mobile, lets try scanning
+    } else if (_isMobileViewport) {
+      // 모바일: nav a[href="/my-page"] 기준으로 삽입
       const selected = document.getElementsByTagName("a");
       for (const element of selected) {
         if (element.getAttribute("href") === "/my-page") {
@@ -1984,6 +2058,8 @@ GM_addStyle(`
               .display(document.body.getAttribute("data-theme") !== "light");
           };
           element.parentElement?.append(clonedElement);
+          _menuInjected = true;
+          break; // 첫 번째 항목만 삽입 (기존 버그 수정: break 누락)
         }
       }
     }
@@ -2214,32 +2290,32 @@ GM_addStyle(`
   // =====================================================
 
   async function injectBannerButton() {
-    const selected = document.getElementsByClassName("burner-button");
-    if (selected && selected.length > 0) {
-      return;
-    }
-    // Top element
-    const topPanel = document.getElementsByClassName(CrackUtil.path().isStoryPath() ? "css-1c5w7et" : "css-l8r172");
-    if (topPanel && topPanel.length > 0) {
-      const topContainer = GenericUtil.refine(topPanel[0].childNodes[topPanel.length - 1])?.getElementsByTagName("div");
-      if (!topContainer || topContainer.length <= 0) return;
-      const topList = topContainer[0].children[0].children;
-      const top = topList[topList.length - 1];
-      const buttonCloned = document.createElement("button");
-      buttonCloned.innerHTML = "<p></p>";
-      buttonCloned.style.cssText = "margin-right: 10px";
-      buttonCloned.className = "burner-button";
-      const textNode = buttonCloned.getElementsByTagName("p");
-      top.insertBefore(buttonCloned, top.childNodes[0]);
-      textNode[0].innerText = "🔥  Chasm Ignitor";
-      buttonCloned?.removeAttribute("onClick");
-      buttonCloned?.addEventListener("click", () => {
-        ModalManager.getOrCreateManager("c2")
-          .withLicenseCredential()
-          .display(document.body.getAttribute("data-theme") !== "light", ["결정화 캐즘 이그나이터"]);
-      });
-    }
+  const selected = document.getElementsByClassName("burner-button");
+  if (selected && selected.length > 0) {
+    return;
   }
+  // Top element: 작품명 타이틀 버튼을 기준점으로 옆 버튼 그룹을 구조적으로 탐색
+  // (Emotion 해시 클래스는 빌드마다 바뀌므로 더 이상 사용하지 않음)
+  const titleSpan = document.querySelector('button > span.line-clamp-1.text-ellipsis');
+  const titleButton = titleSpan?.closest('button');
+  const buttonGroup = titleButton?.nextElementSibling;
+
+  if (buttonGroup && buttonGroup.children.length > 0) {
+    const buttonCloned = document.createElement("button");
+    buttonCloned.innerHTML = "<p></p>";
+    buttonCloned.style.cssText = "margin-right: 10px";
+    buttonCloned.className = "burner-button";
+    const textNode = buttonCloned.getElementsByTagName("p");
+    buttonGroup.insertBefore(buttonCloned, buttonGroup.children[0]);
+    textNode[0].innerText = "🔥  Chasm Ignitor";
+    buttonCloned?.removeAttribute("onClick");
+    buttonCloned?.addEventListener("click", () => {
+      ModalManager.getOrCreateManager("c2")
+        .withLicenseCredential()
+        .display(document.body.getAttribute("data-theme") !== "light", ["결정화 캐즘 이그나이터"]);
+    });
+  }
+}
 
   async function injectInputbutton() {
     const selected = document.getElementsByClassName("burner-input-button");
