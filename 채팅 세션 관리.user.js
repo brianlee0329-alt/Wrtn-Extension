@@ -1,18 +1,8 @@
 // ==UserScript==
 // @name         채팅 세션 관리
 // @namespace    https://github.com/workforomg/Utill
-// @version      3.1.1
+// @version      3.1.2
 // @description  보관함/채팅 목록 탭 분리 + 검색/메모/이어하기/이름 애니메이션 + 보관함 카테고리 통합
-// @changelog    v3.1.0: "카테고리 관리" 모달에 오버레이 포지셔닝 CSS가 누락되어
-//               열어도 보이지 않던 치명적 버그 수정(#crack-move-modal과 규칙 공유)
-//               / 카테고리 표시 순서를 영속 저장해 접기·펼치기 시 위치·개수가
-//               흔들리던 문제 수정 / 카테고리 색을 헤더뿐 아니라 소속 보관함
-//               행 배경에도 옅게 적용 / 개별 보관함 카테고리 지정 모달에서
-//               신규 카테고리 생성 UI 제거(전체 카테고리 관리로 일원화)
-//               v3.1.1: 카테고리 그룹핑을 flex order 기반 시각적 정렬로 전환(오분류 표시 버그 수정)
-//               / 카테고리 색상을 점(dot) 대신 태그(pill)로 표시 / 헤더 개별 수정버튼 제거,
-//               상단 "카테고리 관리" 모달 하나로 생성·이름변경·색상변경·삭제 통합 / 검색 중
-//               헤더 숨김 판정을 DOM 인접 가정 대신 실제 카테고리 매핑 기준으로 수정
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
 // @run-at       document-end
@@ -31,6 +21,7 @@
     const COLLAPSE_KEY   = 'crack_archive_collapse_v1'; // {카테고리명: boolean(접힘여부)}
     const COLOR_KEY       = 'crack_archive_cat_color_v1'; // {카테고리명: 팔레트색상키}
     const ORDER_KEY        = 'crack_archive_cat_order_v1'; // [카테고리명, ...] 표시 순서(영속)
+    const ITEM_ORDER_KEY   = 'crack_archive_item_order_v1'; // {카테고리명: [보관함이름, ...]} 카테고리 내부 순서(영속)
     const UNCATEGORIZED  = '미분류';
 
     // 카테고리 색상 팔레트 (8색 고정 테마)
@@ -45,6 +36,13 @@
     const SEL_MORE_BTN = 'button[aria-label="채팅방 메뉴"]';
     const SEL_VSCROLL  = '[data-testid="virtuoso-scroller"]';
     const SEL_VLIST    = '[data-testid="virtuoso-item-list"]';
+    // [v3.1.2] data-testid="virtuoso-item-list" / "virtuoso-scroller"는 플랫폼
+    // 전역에서 재사용되는 값이라(예: 보관함 이동 모달의 내부 라디오 리스트도 동일
+    // testid를 가짐), 이 값을 그대로 전역 CSS 셀렉터로 쓰면 사이드바 밖의 다른
+    // Virtuoso 인스턴스에도 그대로 적용돼버린다. 스크립트가 실제로 관리하는
+    // 사이드바 리스트 패널에만 마커 클래스를 부여하고, 레이아웃에 영향을 주는
+    // CSS는 전부 이 클래스로 스코프한다.
+    const VROOT_CLASS  = 'crack-vlist-root';
 
     /* ================================================================
        0. 데이터 레이어
@@ -63,6 +61,7 @@
     let _memCollapse = null; // crack_archive_collapse_v1
     let _memColor    = null; // crack_archive_cat_color_v1
     let _memOrder    = null; // crack_archive_cat_order_v1
+    let _memItemOrder = null; // crack_archive_item_order_v1
 
     function _loadCache()    { try { return JSON.parse(localStorage.getItem(CACHE_KEY))    || {}; } catch { return {}; } }
     function _loadMemo()     { try { return JSON.parse(localStorage.getItem(MEMO_KEY))     || {}; } catch { return {}; } }
@@ -70,6 +69,7 @@
     function _loadCollapse() { try { return JSON.parse(localStorage.getItem(COLLAPSE_KEY)) || {}; } catch { return {}; } }
     function _loadColor()    { try { return JSON.parse(localStorage.getItem(COLOR_KEY))    || {}; } catch { return {}; } }
     function _loadOrder()    { try { return JSON.parse(localStorage.getItem(ORDER_KEY))    || []; } catch { return []; } }
+    function _loadItemOrder() { try { return JSON.parse(localStorage.getItem(ITEM_ORDER_KEY)) || {}; } catch { return {}; } }
 
     // ── 세션 캐시 ───────────────────────────────────────────────────
     function getCache() { if (!_memCache) _memCache = _loadCache(); return _memCache; }
@@ -120,6 +120,72 @@
         if (idx !== -1) order[idx] = newName; else order.push(newName);
         saveCategoryOrder(order);
     }
+    // 카테고리 목록을 위/아래로 한 칸 이동 (카테고리 관리 모달의 ▲▼용)
+    function moveCategoryOrder(category, direction) {
+        const order = getCategoryOrder();
+        const idx = order.indexOf(category);
+        if (idx === -1) return;
+        const next = idx + direction;
+        if (next < 0 || next >= order.length) return;
+        [order[idx], order[next]] = [order[next], order[idx]];
+        saveCategoryOrder(order);
+    }
+    // 살아있는(보관함이 1개 이상 배정된) 카테고리를, 영속 표시 순서(getCategoryOrder)
+    // 기준으로 정렬해 반환. 순서 목록에 아직 없는 카테고리는 끝에 등록.
+    // 카테고리 관리 모달의 목록 표기가 사이드바 실제 표시 순서와 어긋나지
+    // 않도록 getAllCategories() 대신 이걸 쓴다.
+    function getOrderedCategories() {
+        const live = new Set(getAllCategories());
+        const order = getCategoryOrder();
+        let changed = false;
+        live.forEach(cat => { if (!order.includes(cat)) { order.push(cat); changed = true; } });
+        if (changed) saveCategoryOrder(order);
+        return order.filter(cat => live.has(cat));
+    }
+
+    // ── 카테고리 내부 보관함 표시 순서 ───────────────────────────────
+    // 플랫폼이 보관함을 "최근 진입 순"으로 재배열하는 탓에, 카테고리 내부
+    // 항목 순서를 DOM 등장 순서에서 그대로 뽑으면 보관함을 열고 나올 때마다
+    // 흔들린다. 카테고리 표시 순서(ORDER_KEY)와 동일한 원리로, 항목 순서도
+    // 이름 기준으로 별도 영속시켜 DOM/플랫폼 순서와 무관하게 고정한다.
+    function getItemOrderMap() { if (!_memItemOrder) _memItemOrder = _loadItemOrder(); return _memItemOrder; }
+    function saveItemOrderMap(m) { _memItemOrder = m; localStorage.setItem(ITEM_ORDER_KEY, JSON.stringify(m)); }
+    function getItemOrder(category) { return getItemOrderMap()[category] || []; }
+    // 현재 마운트된 항목 중 순서 목록에 없는 이름을 끝에 추가.
+    // [중요] Virtuoso는 항상 일부만 마운트하므로, "지금 안 보인다"는 이유로
+    // 순서 목록에서 빼면 안 됨(화면 밖에 있을 뿐인 항목이 잘려나가는 버그).
+    // 그래서 정리(prune)는 DOM 마운트 여부가 아니라 영속 데이터인
+    // getCategoryMap()의 실제 배정 현황을 기준으로만 한다 — 다른 카테고리로
+    // 재배정되거나 카테고리가 삭제된 경우에만 안전하게 제거됨.
+    // 미분류는 "배정 안 됨"이 곧 멤버십이라 별도 영속 전체 목록이 없으므로,
+    // 오삭제 방지를 위해 추가만 하고 정리는 하지 않는다.
+    function ensureItemsInOrder(category, mountedNames) {
+        const m = getItemOrderMap();
+        let list = m[category] || [];
+        let changed = false;
+        mountedNames.forEach(n => { if (!list.includes(n)) { list.push(n); changed = true; } });
+        if (category !== UNCATEGORIZED) {
+            const catMap = getCategoryMap();
+            const filtered = list.filter(n => catMap[n] === category);
+            if (filtered.length !== list.length) changed = true;
+            list = filtered;
+        }
+        if (changed) { m[category] = list; saveItemOrderMap(m); }
+    }
+    // 드래그 드롭 결과 반영: draggedName을 같은 카테고리 내 targetName 앞으로 이동
+    // 드래그 드롭 결과 반영: draggedName을 같은 카테고리 내 targetName 앞/뒤로 이동
+    // (placeAfter=false → before, true → after. 커서가 targetName 카드의
+    // 위쪽/아래쪽 절반 중 어디 있었는지로 결정됨 — injectMoveButtons 참고)
+    function reorderItem(category, draggedName, targetName, placeAfter) {
+        const m = getItemOrderMap();
+        const list = (m[category] || []).filter(n => n !== draggedName);
+        let idx = list.indexOf(targetName);
+        if (idx === -1) idx = list.length;
+        else if (placeAfter) idx += 1;
+        list.splice(idx, 0, draggedName);
+        m[category] = list;
+        saveItemOrderMap(m);
+    }
 
     function setCategoryOf(archiveName, category) {
         const m = getCategoryMap();
@@ -156,6 +222,8 @@
         setCategoryColor(category, null);
         setCategoryCollapsed(category, false);
         removeFromOrder(category);
+        const itemOrderMap = getItemOrderMap();
+        if (itemOrderMap[category]) { delete itemOrderMap[category]; saveItemOrderMap(itemOrderMap); }
     }
     // 카테고리 이름 변경: 소속 보관함 매핑 + 색상 + 접힘 상태 + 표시 순서를 모두 새 이름으로 이전
     function renameCategory(oldName, newName) {
@@ -168,6 +236,12 @@
         setCategoryColor(newName, color);
         if (isCategoryCollapsed(oldName)) { setCategoryCollapsed(oldName, false); setCategoryCollapsed(newName, true); }
         renameInOrder(oldName, newName);
+        const itemOrderMap = getItemOrderMap();
+        if (itemOrderMap[oldName]) {
+            itemOrderMap[newName] = itemOrderMap[oldName];
+            delete itemOrderMap[oldName];
+            saveItemOrderMap(itemOrderMap);
+        }
     }
     // 보관함이 0개로 줄어든 카테고리의 색상/접힘/순서 메타데이터를 정리 (고아 데이터 방지)
     function pruneOrphanCategoryMeta() {
@@ -189,6 +263,13 @@
         const order = getCategoryOrder();
         const cleanedOrder = order.filter(cat => live.has(cat));
         if (cleanedOrder.length !== order.length) saveCategoryOrder(cleanedOrder);
+
+        const itemOrderMap = getItemOrderMap();
+        let itemOrderChanged = false;
+        Object.keys(itemOrderMap).forEach(cat => {
+            if (cat !== UNCATEGORIZED && !live.has(cat)) { delete itemOrderMap[cat]; itemOrderChanged = true; }
+        });
+        if (itemOrderChanged) saveItemOrderMap(itemOrderMap);
     }
 
     // ── 카테고리 색상 ───────────────────────────────────────────────
@@ -215,7 +296,7 @@
     // 보관함 이름 캐시(ANAME_KEY)는 향후 디버깅/마이그레이션 대비용으로 계속 기록만 함
     function cacheArchiveNames() {
         // 보관함 버튼(button.flex.items-center.gap-2)의 이름만 수집 (채팅 세션 a 태그 제외)
-        const fresh = [...document.querySelectorAll(`${SEL_VLIST} div[data-index] button.flex.items-center ${SEL_NAME}`)]
+        const fresh = [...document.querySelectorAll(`.${VROOT_CLASS} ${SEL_VLIST} div[data-index] button.flex.items-center ${SEL_NAME}`)]
             .map(s => s.textContent.trim()).filter(Boolean);
         if (!fresh.length) return;
         // 카테고리가 이미 지정된 보관함 이름도 포함하여 유지 (검색 등에서 누락 방지)
@@ -243,15 +324,59 @@
     /* ================================================================
        2. 유틸
     ================================================================ */
-    // 전체 보관함(archive-list) 화면 상단의 '뒤로가기 + 보관함 + ⋮메뉴' 헤더 바를 숨김.
-    // 개별 보관함 내부(archive-inner)에서는 동일 구조가 다른 제목으로 쓰이므로 건드리지 않음.
+    // 전체 보관함(archive-list) 화면 상단 헤더에서 뒤로가기 버튼+타이틀만 숨김.
+    // [v3.2.1] 헤더 바 전체를 display:none 처리하면 '보관함 메뉴'(⋮ → 새 보관함
+    // 만들기/편집) 버튼까지 같이 사라지는 버그가 있었음. 대신 헤더 내부의
+    // 뒤로가기 버튼과 '보관함' 타이틀 텍스트 노드만 숨기고, 우측 메뉴 버튼은
+    // 우리 탭 바(#crack-view-tabs) 오른쪽으로 재배치해서 계속 접근 가능하게 한다.
     function setArchiveListHeaderHidden(hidden) {
         const titleSpan = document.querySelector('div.shrink-0.flex.items-center.gap-2.h-12.px-2 span.flex-1');
         if (!titleSpan || titleSpan.textContent.trim() !== '보관함') return;
         const headerBar = titleSpan.closest('div.shrink-0.flex.items-center.gap-2.h-12.px-2');
         if (!headerBar) return;
-        const next = hidden ? 'none' : '';
-        if (headerBar.style.display !== next) headerBar.style.display = next;
+        if (hidden) {
+            // 뒤로가기 + 타이틀 스팬만 숨김
+            const backBtn = headerBar.querySelector('button[aria-label="뒤로가기"]');
+            if (backBtn && backBtn.style.display !== 'none') backBtn.style.display = 'none';
+            if (titleSpan.style.display !== 'none') titleSpan.style.display = 'none';
+            // 헤더 바 자체의 높이를 0으로 눌러 공간 낭비 없앰
+            if (headerBar.style.minHeight !== '0') {
+                headerBar.style.minHeight = '0';
+                headerBar.style.height = '0';
+                headerBar.style.overflow = 'hidden';
+                headerBar.style.padding = '0';
+            }
+            // 보관함 메뉴 버튼을 탭 바로 이식 — 이미 이식된 경우 skip
+            const tabs = document.getElementById('crack-view-tabs');
+            if (tabs && !tabs.querySelector('.crack-arch-menu-btn-wrapper')) {
+                const archMenuBtn = headerBar.querySelector('button[aria-label="보관함 메뉴"]');
+                if (archMenuBtn) {
+                    const wrapper = document.createElement('span');
+                    wrapper.className = 'crack-arch-menu-btn-wrapper';
+                    wrapper.title = '보관함 메뉴 (새 보관함 만들기 / 편집)';
+                    // cloneNode 없이 원본을 직접 이식 — Radix 이벤트 리스너가 그대로 살아있어야 드롭다운이 작동함
+                    wrapper.appendChild(archMenuBtn);
+                    tabs.appendChild(wrapper);
+                }
+            }
+        } else {
+            // 복구: 뒤로가기/타이틀 다시 표시, 헤더 바 높이 원복
+            const backBtn = headerBar.querySelector('button[aria-label="뒤로가기"]');
+            if (backBtn) backBtn.style.display = '';
+            titleSpan.style.display = '';
+            headerBar.style.minHeight = '';
+            headerBar.style.height = '';
+            headerBar.style.overflow = '';
+            headerBar.style.padding = '';
+            // 탭 바에 이식된 wrapper가 있으면 메뉴 버튼을 헤더 바로 되돌림
+            const tabs = document.getElementById('crack-view-tabs');
+            const wrapper = tabs?.querySelector('.crack-arch-menu-btn-wrapper');
+            if (wrapper) {
+                const archMenuBtn = wrapper.querySelector('button[aria-label="보관함 메뉴"]');
+                if (archMenuBtn) headerBar.appendChild(archMenuBtn);
+                wrapper.remove();
+            }
+        }
     }
 
     function extractTitle(a) {
@@ -296,9 +421,26 @@
     }
 
     let _lastScrollOffset = -1; // 이전 offset 캐시 (-1 = 초기화되지 않음)
+    let _dragState = null; // 카테고리 내부 순서 드래그 중인 보관함 정보 {name, cat, sourceWrapper}
+    let _dragOverEl = null; // 현재 강조 표시 중인 타겟 wrapper (전체 쿼리 없이 O(1) 정리용)
+    let _dragRafId = null; // mousemove 히트테스트 rAF 쓰로틀 id
+    let _dragLastX = 0, _dragLastY = 0; // rAF 콜백에서 사용할 최신 커서 좌표
+
+    /* ================================================================
+       2-c. 사이드바 패널 스코프 마커
+            [v3.1.2] injectViewTabs()가 사이드바 본문을 찾을 때 쓰는 것과
+            동일한 셀렉터로 "스크립트가 실제로 관리하는 영역"을 식별해
+            VROOT_CLASS를 부여. 이미 들어있으면 classList.add는 사실상
+            no-op이므로 매 tick 호출해도 추가 비용은 미미함.
+    ================================================================ */
+    function markSidebarPanelRoot() {
+        const root = document.querySelector('div.flex-1.min-w-0.min-h-0.overflow-hidden.pl-2')
+                  || document.querySelector('div.flex-1.min-h-0.overflow-hidden.pl-2');
+        if (root && !root.classList.contains(VROOT_CLASS)) root.classList.add(VROOT_CLASS);
+    }
 
     function adjustScrollerHeight() {
-        const scroller = document.querySelector(SEL_VSCROLL);
+        const scroller = document.querySelector(`.${VROOT_CLASS} ${SEL_VSCROLL}`);
         if (!scroller) {
             if (_lastScrollOffset !== 0) { _getDynStyle().textContent = ''; _lastScrollOffset = 0; }
             return;
@@ -313,7 +455,7 @@
         _lastScrollOffset = ceiled;
 
         _getDynStyle().textContent = ceiled > 0
-            ? `[data-testid="virtuoso-scroller"]{height:calc(100% - ${ceiled}px)!important;}`
+            ? `.${VROOT_CLASS} [data-testid="virtuoso-scroller"]{height:calc(100% - ${ceiled}px)!important;}`
             : '';
     }
 
@@ -321,22 +463,32 @@
        3. 메인 뷰: 보관함 섹션 숨김
           data-attribute 방식: CSS가 선택자로 직접 제어하므로
           React 재조정(reconciliation)으로 inline style이 초기화돼도 유지됨
+          [v3.2.1] 기존 구현이 'relative' 첫 매칭으로 조상을 올라가다
+          `relative flex-1 min-h-0 flex flex-col` — 즉 우리 탭+리스트 전체
+          패널을 잡아 data-crack-arch-section을 붙여버려, `display:none`으로
+          보관함 목록이 통째로 사라지는 버그가 있었음.
+          수정: trigger 버튼의 직계 부모(보관함 미리보기 헤더 행)를 거쳐
+          그 부모 컨테이너(미리보기 섹션 전체)까지만 올라가도록 두 단계로
+          제한. 구조적으로 'flex flex-col' + 'max-h-[284px]'를 가진 div가
+          메인 뷰의 보관함 축소 섹션이므로 이를 명시적 클래스 조합으로 검증.
     ================================================================ */
     function hideNativeArchiveSection() {
         const trigger = document.querySelector('button[aria-label="보관함 전체보기"]');
         if (!trigger) return;
 
-        // trigger → 조상 중 class="relative"인 div 탐색
-        let rel = trigger.parentElement;
-        while (rel && rel !== document.body) {
-            if (rel.tagName === 'DIV' && rel.classList.contains('relative')) break;
-            rel = rel.parentElement;
-        }
-        if (!rel || rel === document.body) return;
+        // trigger → 헤더 행(h-7 flex items-center) → 보관함 미리보기 섹션
+        // 캡처 확인: trigger.parentElement = div.flex.items-center.gap-2.h-7.pl-2
+        //            .parentElement = div.flex.flex-col.pt-0.pb-2.max-h-[284px].overflow-hidden
+        const headerRow = trigger.parentElement;
+        const section = headerRow?.parentElement;
+        if (!section) return;
 
-        // data attribute 마킹 (GM_addStyle의 CSS가 이 attribute로 숨김 처리)
-        rel.setAttribute('data-crack-arch-section', '1');
-        const divider = rel.nextElementSibling;
+        // 안전 검증: 미리보기 섹션은 max-h-[284px]를 갖는 flex-col div임을 확인
+        // 그 이상(relative flex-1 min-h-0 등)을 잡으면 탭·리스트 전체가 숨겨지므로 중단
+        if (!section.classList.contains('flex-col') || !section.classList.contains('overflow-hidden')) return;
+
+        section.setAttribute('data-crack-arch-section', '1');
+        const divider = section.nextElementSibling;
         if (divider) divider.setAttribute('data-crack-arch-divider', '1');
         const chatHdr = divider?.nextElementSibling;
         if (chatHdr) chatHdr.setAttribute('data-crack-chat-hdr', '1');
@@ -414,7 +566,7 @@
     ================================================================ */
     function injectSearchBar() {
         if (document.getElementById('crack-search-container')) return;
-        const scroller = document.querySelector(SEL_VSCROLL);
+        const scroller = document.querySelector(`.${VROOT_CLASS} ${SEL_VSCROLL}`);
         if (!scroller?.parentElement) return;
         const wrap = document.createElement('div');
         wrap.id = 'crack-search-container';
@@ -433,7 +585,7 @@
         const kw   = raw.toLowerCase().replace(/\s+/g, '');
         const view = detectView();
 
-        document.querySelectorAll(`${SEL_VLIST} div[data-index]`).forEach(wrapper => {
+        document.querySelectorAll(`.${VROOT_CLASS} ${SEL_VLIST} div[data-index]`).forEach(wrapper => {
             // 카테고리가 접힌 상태로 숨겨진 보관함은 검색 결과와 무관하게 숨김 유지
             if (wrapper.dataset.crackCatHide === '1') return;
 
@@ -459,7 +611,7 @@
         // 전체 wrapper 기준으로 다시 계산해 판정한다.
         if (view === 'archive-list') {
             const visibleByCat = new Map(); // category -> 보이는 항목 존재 여부
-            document.querySelectorAll(`${SEL_VLIST} div[data-index]`).forEach(wrapper => {
+            document.querySelectorAll(`.${VROOT_CLASS} ${SEL_VLIST} div[data-index]`).forEach(wrapper => {
                 const name = wrapper.querySelector(SEL_NAME)?.textContent.trim();
                 if (!name) return;
                 const cat = getCategoryOf(name);
@@ -499,7 +651,7 @@
             document.querySelectorAll('.crack-cat-header').forEach(el => {
                 if (el.style.display !== 'none') el.style.display = 'none';
             });
-            document.querySelectorAll(`${SEL_VLIST} div[data-index]`).forEach(w => {
+            document.querySelectorAll(`.${VROOT_CLASS} ${SEL_VLIST} div[data-index]`).forEach(w => {
                 if (w.dataset.crackCatHide === '1') {
                     w.style.removeProperty('display');
                     delete w.dataset.crackCatHide;
@@ -513,10 +665,10 @@
             return;
         }
 
-        const wrappers = [...document.querySelectorAll(`${SEL_VLIST} div[data-index]`)];
+        const wrappers = [...document.querySelectorAll(`.${VROOT_CLASS} ${SEL_VLIST} div[data-index]`)];
         if (!wrappers.length) return;
 
-        // 카테고리별로 그룹화 (Virtuoso/플랫폼이 내려준 등장 순서 그대로 유지)
+        // 카테고리별로 그룹화 (1차 분류 — 그룹 내부 순서는 다음 단계에서 재정렬)
         const groups = new Map(); // category -> wrapper[]
         wrappers.forEach(wrapper => {
             const name = wrapper.querySelector(SEL_NAME)?.textContent.trim();
@@ -524,6 +676,23 @@
             const cat = getCategoryOf(name);
             if (!groups.has(cat)) groups.set(cat, []);
             groups.get(cat).push(wrapper);
+        });
+
+        // [v3.1.2] 카테고리 "내부" 보관함 순서를 영속 데이터 기준으로 고정.
+        // 플랫폼이 보관함을 최근 진입 순으로 재배열하는 탓에, 그룹 내부 순서를
+        // 매번 "이번 tick의 DOM 등장 순서"에서 뽑으면 보관함을 열고 나올 때마다
+        // 흔들린다(카테고리 자체 순서를 영속화한 것과 동일한 이유).
+        groups.forEach((arr, cat) => {
+            const names = arr.map(w => w.querySelector(SEL_NAME)?.textContent.trim()).filter(Boolean);
+            ensureItemsInOrder(cat, names);
+            const order = getItemOrder(cat);
+            arr.sort((wa, wb) => {
+                const na = wa.querySelector(SEL_NAME)?.textContent.trim() || '';
+                const nb = wb.querySelector(SEL_NAME)?.textContent.trim() || '';
+                let ia = order.indexOf(na); if (ia === -1) ia = order.length;
+                let ib = order.indexOf(nb); if (ib === -1) ib = order.length;
+                return ia - ib;
+            });
         });
 
         // [v3.1.0] 표시 순서는 더 이상 "이번 tick에 마운트된 DOM 등장 순서"에서
@@ -647,39 +816,153 @@
     }
 
     /* ================================================================
-       7. 보관함 목록/편집 뷰 공통: 카테고리 지정 버튼 주입
-          - 각 보관함 카드 우상단 '보관함 메뉴'(⋮) 버튼이 들어있는
-            .absolute.top-3.right-3 컨테이너에 버튼을 추가 삽입
+       7-a. 커스텀 드래그 (mousedown/mousemove/mouseup 기반)
+            [v3.2.3] 기존엔 HTML5 네이티브 Drag and Drop API(draggable=true
+            + dragover/drop)를 썼으나, React가 관리하는 Virtuoso 가상 리스트
+            내부에서 네이티브 drag 이벤트가 간헐적으로 전달되지 않는 현상이
+            있었음(CSS 자체는 tinycss2로 직접 검증해 문법·셀렉터 모두 정상—
+            이벤트 전달 쪽 문제로 결론). 더 예측 가능한 mousedown/mousemove/
+            mouseup + elementFromPoint 기반 수동 드래그로 교체해, 강조 표시가
+            브라우저의 네이티브 drag 세션 처리에 의존하지 않고 100% 우리
+            통제 하에 매 프레임 직접 렌더링되게 한다.
+    ================================================================ */
+    // 화면 좌표(x,y) 아래의 보관함 카드(wrapper)를 찾는다. VROOT_CLASS 스코프
+    // 밖(예: 보관함 이동 모달의 동일 testid 리스트)은 명시적으로 제외한다.
+    function findDropWrapper(x, y) {
+        const el = document.elementFromPoint(x, y);
+        if (!el) return null;
+        const wrapper = el.closest('div[data-index]');
+        if (!wrapper || !wrapper.closest(`.${VROOT_CLASS}`)) return null;
+        return wrapper;
+    }
+    function clearDragHighlight() {
+        if (_dragOverEl) {
+            _dragOverEl.classList.remove('crack-drop-before', 'crack-drop-after');
+            _dragOverEl = null;
+        }
+    }
+    // 히트테스트 결과로 강조 클래스를 갱신. 자기 자신/다른 카테고리 카드 위에
+    // 있으면 기존 강조만 정리(드래그 자체는 그대로 진행 중인 상태 유지).
+    function updateDragHighlight(x, y) {
+        if (!_dragState) return;
+        const wrapper = findDropWrapper(x, y);
+        const targetName = wrapper?.querySelector(SEL_NAME)?.textContent.trim();
+        if (!wrapper || !targetName || targetName === _dragState.name || getCategoryOf(targetName) !== _dragState.cat) {
+            clearDragHighlight();
+            return;
+        }
+        if (_dragOverEl && _dragOverEl !== wrapper) {
+            _dragOverEl.classList.remove('crack-drop-before', 'crack-drop-after');
+        }
+        _dragOverEl = wrapper;
+        const rect = wrapper.getBoundingClientRect();
+        const after = (y - rect.top) > rect.height / 2;
+        wrapper.classList.toggle('crack-drop-before', !after);
+        wrapper.classList.toggle('crack-drop-after',   after);
+        wrapper.dataset.crackDropAfter = after ? '1' : '0';
+    }
+    function onDragMouseMove(e) {
+        _dragLastX = e.clientX;
+        _dragLastY = e.clientY;
+        if (_dragRafId) return; // 이미 다음 프레임에 처리 예약됨 — 쓰로틀
+        _dragRafId = requestAnimationFrame(() => {
+            _dragRafId = null;
+            updateDragHighlight(_dragLastX, _dragLastY);
+        });
+    }
+    function onDragMouseUp(e) {
+        document.removeEventListener('mousemove', onDragMouseMove);
+        document.removeEventListener('mouseup', onDragMouseUp, true);
+        if (_dragRafId) { cancelAnimationFrame(_dragRafId); _dragRafId = null; }
+        document.body.classList.remove('crack-dragging-active');
+
+        const dragged = _dragState;
+        _dragState = null;
+        dragged?.sourceWrapper?.classList.remove('crack-dragging');
+
+        const wrapper = findDropWrapper(e.clientX, e.clientY);
+        clearDragHighlight();
+        if (!dragged || !wrapper) return;
+        const targetName = wrapper.querySelector(SEL_NAME)?.textContent.trim();
+        if (!targetName || targetName === dragged.name) return;
+        if (getCategoryOf(targetName) !== dragged.cat) return; // 카테고리 간 이동은 🏷 버튼으로만
+        reorderItem(dragged.cat, dragged.name, targetName, wrapper.dataset.crackDropAfter === '1');
+        applyArchiveCategories();
+    }
+    function startDrag(wrapper, e) {
+        e.preventDefault(); // 텍스트 선택 등 네이티브 동작 방지
+        const liveName = wrapper.querySelector(SEL_NAME)?.textContent.trim();
+        if (!liveName) return;
+        _dragState = { name: liveName, cat: getCategoryOf(liveName), sourceWrapper: wrapper };
+        wrapper.classList.add('crack-dragging');
+        document.body.classList.add('crack-dragging-active');
+        document.addEventListener('mousemove', onDragMouseMove);
+        // capture 단계에서 등록 — 중간 요소가 mouseup에서 stopPropagation해도 누락되지 않게
+        document.addEventListener('mouseup', onDragMouseUp, true);
+    }
+
+    /* ================================================================
+       7-b. 보관함 목록/편집 뷰 공통: 카테고리 지정 버튼 + 순서 드래그 핸들 주입
+          - 카테고리 지정(🏷) 버튼은 우상단 '보관함 메뉴'(⋮) 옆 클러스터에
+          - 드래그 핸들(⠿)은 카드 좌측 전체 높이 스트립 — 작은 아이콘보다
+            위/아래 절반 판정 히트존이 훨씬 넓어져서 잡기 쉬움.
+          드롭 위치 표시는 커서가 타겟 카드의 위쪽/아래쪽 절반 중 어디 있는지에
+          따라 카드 테두리 강조 + 그 경계에 삽입선을 그려 "여기 앞/뒤에 꽂힌다"가
+          명확히 보이게 한다(updateDragHighlight 참고).
     ================================================================ */
     function injectMoveButtons() {
-        document.querySelectorAll(`${SEL_VLIST} div[data-index]`).forEach(wrapper => {
+        document.querySelectorAll(`.${VROOT_CLASS} ${SEL_VLIST} div[data-index]`).forEach(wrapper => {
+            const relDiv = wrapper.querySelector('.relative');
             const absDiv = wrapper.querySelector('.absolute.top-3.right-3');
-            // 보관함 메뉴 버튼이 아직 렌더링되지 않은 경우 다음 tick에 재시도
-            if (!absDiv) return;
-            if (absDiv.querySelector('.crack-move-btn')) return;
+            // 보관함 메뉴 버튼/카드 구조가 아직 렌더링되지 않은 경우 다음 tick에 재시도
+            if (!relDiv || !absDiv) return;
 
-            const btn = document.createElement('button');
-            btn.type = 'button';
-            btn.className = 'crack-move-btn';
-            btn.title = '카테고리 지정';
-            btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>`;
-            btn.addEventListener('click', e => {
-                e.preventDefault();
-                e.stopPropagation();
-                // Virtuoso가 노드를 재사용해도 클릭 시점에 실제 이름을 다시 읽어
-                // stale closure로 인한 잘못된 보관함 지정을 방지
-                const liveName = wrapper.querySelector(SEL_NAME)?.textContent.trim();
-                if (!liveName) return;
-                openCategoryAssignModal(liveName);
-            });
-            absDiv.insertBefore(btn, absDiv.firstChild);
+            if (absDiv.style.display !== 'flex') {
+                absDiv.style.display = 'flex';
+                absDiv.style.alignItems = 'center';
+                absDiv.style.gap = '2px';
+            }
+
+            if (!absDiv.querySelector('.crack-move-btn')) {
+                const btn = document.createElement('button');
+                btn.type = 'button';
+                btn.className = 'crack-move-btn';
+                btn.title = '카테고리 지정';
+                btn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="14" height="14"><path d="M10 4H4c-1.1 0-2 .9-2 2v12c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2h-8l-2-2z"/></svg>`;
+                btn.addEventListener('click', e => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    // Virtuoso가 노드를 재사용해도 클릭 시점에 실제 이름을 다시 읽어
+                    // stale closure로 인한 잘못된 보관함 지정을 방지
+                    const liveName = wrapper.querySelector(SEL_NAME)?.textContent.trim();
+                    if (!liveName) return;
+                    openCategoryAssignModal(liveName);
+                });
+                absDiv.insertBefore(btn, absDiv.firstChild);
+            }
+
+            if (!relDiv.querySelector('.crack-drag-handle')) {
+                const handle = document.createElement('span');
+                handle.className = 'crack-drag-handle';
+                handle.title = '드래그해서 같은 카테고리 내 순서 변경';
+                handle.textContent = '⠿';
+                // 핸들이 .relative의 형제가 아니라 첫 자식으로 들어가지만, 카드
+                // 본문(button/a)과는 별개 요소라 클릭이 버블링돼도 네비게이션
+                // 핸들러에 닿지 않음. 그래도 방어적으로 한 번 더 차단.
+                handle.addEventListener('click', e => { e.preventDefault(); e.stopPropagation(); });
+                handle.addEventListener('mousedown', e => {
+                    e.stopPropagation();
+                    startDrag(wrapper, e);
+                });
+                relDiv.insertBefore(handle, relDiv.firstChild);
+            }
         });
     }
 
     function openCategoryAssignModal(archiveName) {
         document.getElementById('crack-move-modal')?.remove();
         const curCat = getCategoryOf(archiveName);
-        const existingCats = getAllCategories();
+        const existingCats = getOrderedCategories();
 
         const modal = document.createElement('div');
         modal.id = 'crack-move-modal';
@@ -725,12 +1008,12 @@
     ================================================================ */
     function openCategoryManageModal() {
         document.getElementById('crack-catmgr-modal')?.remove();
-        const existingCats = getAllCategories();
+        const existingCats = getOrderedCategories(); // 사이드바와 동일한 표시 순서로 노출
         const counts = getCategoryCounts();
         // 신규 생성 시 배정 후보는 현재 DOM에 보이는 보관함만 가능 (Virtuoso 가상
         // 스크롤 한계: 화면에 렌더링된 카드만 후보가 됨. 필요한 보관함이 안 보이면
         // 스크롤 후 다시 열어주세요)
-        const visibleArchives = [...document.querySelectorAll(`${SEL_VLIST} div[data-index]`)]
+        const visibleArchives = [...document.querySelectorAll(`.${VROOT_CLASS} ${SEL_VLIST} div[data-index]`)]
             .map(w => w.querySelector(SEL_NAME)?.textContent.trim())
             .filter(Boolean);
 
@@ -745,12 +1028,16 @@
                     <div class="ccm-section">
                         <div class="ccm-section-title">카테고리 목록</div>
                         <div class="ccm-cat-list">
-                            ${existingCats.map(c => `
+                            ${existingCats.map((c, i) => `
                                 <div class="ccm-cat-row" data-cat="${c}">
                                     <button type="button" class="ccm-color-dot" data-cat="${c}"
                                             style="--cat-color:${CAT_PALETTE[getCategoryColor(c)]}" title="색상 변경"></button>
                                     <input type="text" class="ccm-cat-name-input" value="${c}" data-orig="${c}">
                                     <span class="ccm-cat-count">${counts[c] || 0}개</span>
+                                    <button type="button" class="csub-btn ccm-order-btn ccm-order-up" data-cat="${c}"
+                                            title="위로" ${i === 0 ? 'disabled' : ''}>▲</button>
+                                    <button type="button" class="csub-btn ccm-order-btn ccm-order-down" data-cat="${c}"
+                                            title="아래로" ${i === existingCats.length - 1 ? 'disabled' : ''}>▼</button>
                                     <button type="button" class="csub-btn ccm-del-btn" data-cat="${c}">삭제</button>
                                 </div>
                                 <div class="cce-palette ccm-palette-row" data-cat="${c}" style="display:none">
@@ -852,6 +1139,24 @@
                 const cat = btn.dataset.cat;
                 if (!confirm(`"${cat}" 카테고리를 삭제하고 소속 보관함을 ${UNCATEGORIZED}로 되돌릴까요?`)) return;
                 deleteCategory(cat);
+                applyArchiveCategories();
+                close();
+                openCategoryManageModal();
+            });
+        });
+
+        // ── 순서 변경: ▲▼ 버튼으로 카테고리 표시 순서 자체를 조정 (모달 재구성)
+        modal.querySelectorAll('.ccm-order-up').forEach(btn => {
+            btn.addEventListener('click', () => {
+                moveCategoryOrder(btn.dataset.cat, -1);
+                applyArchiveCategories();
+                close();
+                openCategoryManageModal();
+            });
+        });
+        modal.querySelectorAll('.ccm-order-down').forEach(btn => {
+            btn.addEventListener('click', () => {
+                moveCategoryOrder(btn.dataset.cat, 1);
                 applyArchiveCategories();
                 close();
                 openCategoryManageModal();
@@ -1095,6 +1400,11 @@
         const view = detectView();
         const viewChanged = (view !== _lastView);
         _lastView = view;
+
+        // [v3.1.2] 아래 분기들의 SEL_VLIST/SEL_VSCROLL 쿼리가 전부 VROOT_CLASS
+        // 스코프로 바뀌었으므로, 마커가 먼저 붙어 있어야 같은 tick에서 바로
+        // 동작한다(맨 아래 공통 섹션에 있던 걸 최상단으로 이동).
+        markSidebarPanelRoot();
 
         // ── 뷰별 UI: 뷰가 바뀌었을 때만 inject/remove 수행 ────────
         // 뷰가 동일한 tick에서는 이미 주입된 요소들이 살아있으므로
@@ -1388,22 +1698,75 @@
         }
         .csub-input {
             flex: 1; padding: 6px 8px; border-radius: 6px;
-            border: 1px solid rgba(0,0,0,.15);
-            background: rgba(255,255,255,.07); color: inherit;
+            border: 1px solid rgba(0,0,0,.18);
+            background: rgba(0,0,0,.04); color: inherit;
             font-size: 13px; outline: none;
         }
         .csub-input:focus { border-color: var(--primary, #FF4432); }
-        .csub-input::placeholder { color: rgba(255,255,255,.3); }
+        .csub-input::placeholder { color: rgba(0,0,0,.35); }
         .csub-btn {
             padding: 6px 12px; border-radius: 6px;
-            border: 1px solid rgba(0,0,0,.15);
-            background: rgba(255,255,255,.07); color: inherit;
+            border: 1px solid rgba(0,0,0,.18);
+            background: rgba(0,0,0,.04); color: inherit;
             font-size: 13px; cursor: pointer; white-space: nowrap;
             transition: background .12s;
         }
-        .csub-btn:hover { background: rgba(255,255,255,.14); }
+        .csub-btn:hover { background: rgba(0,0,0,.08); }
         .csub-btn-primary { background: var(--primary, #FF4432) !important; border-color: var(--primary, #FF4432) !important; color: #000 !important; }
         .csub-btn-primary:hover { background: #ffaea6 !important; }
+        .ccm-order-btn { padding: 4px 7px; font-size: 11px; line-height: 1; }
+        .ccm-order-btn:disabled { opacity: .3; cursor: default; }
+        .ccm-order-btn:disabled:hover { background: rgba(0,0,0,.04); }
+
+        /* [v3.2.3] 드래그 핸들: 카드 좌측 전체 높이 스트립 (마우스 이벤트 기반) */
+        .crack-drag-handle {
+            position: absolute;
+            left: 0; top: 0; bottom: 0;
+            width: 14px;
+            display: flex; align-items: center; justify-content: center;
+            cursor: grab;
+            opacity: 0;
+            font-size: 11px; line-height: 1;
+            color: var(--text_primary, #222);
+            user-select: none; flex-shrink: 0;
+            border-radius: 4px 0 0 4px;
+            transition: opacity .12s, background .12s;
+            z-index: 1;
+        }
+        .${VROOT_CLASS} ${SEL_VLIST} div[data-index] .relative:hover .crack-drag-handle { opacity: .55; }
+        .crack-drag-handle:hover { opacity: 1 !important; background: rgba(0,0,0,.06); }
+        .crack-drag-handle:active { cursor: grabbing; }
+        /* 드래그 중: 텍스트 선택 방지 + 커서 전역 grabbing 표시 */
+        body.crack-dragging-active { cursor: grabbing !important; user-select: none !important; }
+        /* 드래그 중: 출발 카드 희미하게 */
+        .${VROOT_CLASS} ${SEL_VLIST} div[data-index].crack-dragging .relative { opacity: .35; }
+        /* 드롭 위치 강조: 대상 카드 테두리 + 삽입 위치 선 */
+        /* 공통: 대상 카드에 컬러 테두리 */
+        .${VROOT_CLASS} ${SEL_VLIST} div[data-index].crack-drop-before .relative,
+        .${VROOT_CLASS} ${SEL_VLIST} div[data-index].crack-drop-after  .relative {
+            outline: 2px solid var(--primary, #3D8BFF);
+            outline-offset: -1px;
+            border-radius: 8px;
+        }
+        /* 삽입 위치 선: 카드 위쪽(before) 또는 아래쪽(after) 경계 */
+        .${VROOT_CLASS} ${SEL_VLIST} div[data-index].crack-drop-before .relative::before,
+        .${VROOT_CLASS} ${SEL_VLIST} div[data-index].crack-drop-after  .relative::after {
+            content: '';
+            position: absolute; left: 4px; right: 4px; height: 3px;
+            background: var(--primary, #3D8BFF);
+            border-radius: 2px;
+            pointer-events: none;
+            z-index: 10;
+        }
+        .${VROOT_CLASS} ${SEL_VLIST} div[data-index].crack-drop-before .relative::before { top: -2px; }
+        .${VROOT_CLASS} ${SEL_VLIST} div[data-index].crack-drop-after  .relative::after  { bottom: -2px; }
+        /* 보관함 메뉴(⋮) 버튼 탭 바 내 배치 */
+        .crack-arch-menu-btn-wrapper {
+            margin-left: auto;
+            display: flex; align-items: center;
+        }
+        .crack-arch-menu-btn-wrapper button { opacity: .7; }
+        .crack-arch-menu-btn-wrapper button:hover { opacity: 1; }
 
         /* ── 상단 탭 옆 카테고리 관리(생성/이름변경/색상변경/삭제) 버튼 ── */
         #crack-cat-manage-btn {
@@ -1471,8 +1834,12 @@
 
         /* ── 보관함 카테고리 그룹 헤더 (archive-list 목록 내) ──
            [v3.1.0] virtuoso-item-list를 flex column으로 강제해 헤더/항목의
-           style.order로 시각적 그룹핑을 만든다(실제 DOM 위치는 건드리지 않음). */
-        ${SEL_VLIST} { display: flex !important; flex-direction: column !important; }
+           style.order로 시각적 그룹핑을 만든다(실제 DOM 위치는 건드리지 않음).
+           [v3.1.2] data-testid="virtuoso-item-list"는 플랫폼 전역에서 재사용되는
+           값이라(보관함 이동 모달의 내부 리스트도 동일 testid), 과거엔 이 규칙이
+           그 모달에도 그대로 적용돼 스크롤이 끝까지 닿지 않는 부작용이 있었음.
+           VROOT_CLASS로 사이드바 패널 내부로만 한정한다. */
+        .${VROOT_CLASS} ${SEL_VLIST} { display: flex !important; flex-direction: column !important; }
         .crack-cat-header {
             display: flex; align-items: center; gap: 8px;
             padding: 8px 12px; cursor: pointer; user-select: none;
