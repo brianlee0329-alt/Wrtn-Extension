@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         좋아요 목록 관리
 // @namespace    https://github.com/workforomg/Util
-// @version      2.0.2
+// @version      2.0.3
 // @description  좋아요 목록 검색/폴더 기능 지원
 // @match        https://crack.wrtn.ai/liked*
 // @grant        GM_addStyle
@@ -18,9 +18,29 @@
 
     // v2.1.0 패치: 플랫폼 HTML 구조 변경 대응
     // Emotion 해시 클래스 → Tailwind 클래스 기반으로 전환됨
-    const GRID_SEL   = '#liked-scroll div[class*="grid-cols-3"]';  // 작품 그리드 컨테이너
+    // v2.1.1 패치: #liked-scroll 래퍼 ID가 플랫폼 업데이트로 제거됨(전체 페이지 스크롤 방식으로 전환 추정)
+    //              → 고정 ID 대신 getGrid() 함수로 폴백 체인 구성
     const CARD_SEL   = ':scope > div[role="button"]';               // 개별 카드 (직접 자식만)
     const TITLE_SEL  = 'p.line-clamp-2';                           // 작품 제목 텍스트
+    const TITLE_TEXT = '좋아요 목록';                                // 타이틀 식별용 텍스트(해시 클래스 불안정 대비)
+
+    // 작품 그리드 컨테이너 탐색 (해시/구조 변경에 대비한 폴백 체인)
+    function getGrid() {
+        // 1차: 구 구조 (#liked-scroll 래퍼가 추후 복원될 경우 대비)
+        let grid = document.querySelector('#liked-scroll div[class*="grid-cols-3"]');
+        if (grid) return grid;
+        // 2차: 현재(2026-06 기준) 구조 — 래퍼 ID 없이 grid-cols-3 클래스만 존재
+        return document.querySelector('div[class*="grid-cols-3"]');
+    }
+
+    // 타이틀 엘리먼트 탐색 (해시 클래스 우선, 텍스트 내용 폴백)
+    function getTitleElement() {
+        const byClass = document.querySelector('.css-342uqh');
+        if (byClass && byClass.textContent.trim() === TITLE_TEXT) return byClass;
+        return Array.from(document.querySelectorAll('p')).find(
+            p => p.children.length === 0 && p.textContent.trim() === TITLE_TEXT
+        ) || null;
+    }
 
     const PATH_UNSAFE = "m20.7 4.47-8.3-2.68c-.26-.08-.54-.08-.8 0L3.3 4.47c-.54.18-.9.68-.9 1.24v4.12c0 5.74 3.69 10.81 9.18 12.61.13.05.28.07.42.07s.28-.02.42-.07c5.49-1.8 9.18-6.87 9.18-12.61V5.71c0-.56-.36-1.06-.9-1.24M12 6.28c1.83 0 3.31 1.48 3.31 3.31S13.83 12.9 12 12.9s-3.31-1.49-3.31-3.31S10.17 6.28 12 6.28m4.35 12a9 9 0 0 1-.58.51c-.03.03-.07.06-.11.08-.06.06-.13.12-.2.16-.06.06-.13.11-.2.15 0 .01-.01.01-.02.02l-.1.07c-.94.69-2 1.23-3.14 1.62-1.66-.55-3.12-1.45-4.34-2.61a9.3 9.3 0 0 1-1.09-1.17c1.42-1.34 3.67-1.83 5.41-1.83s4.02.49 5.44 1.83c-.32.41-.68.81-1.07 1.17";
 
@@ -158,7 +178,7 @@
         let folders = getFolders();
         let currentFolderId = folders.length > 0 ? folders[0].id : null;
 
-        const grid = document.querySelector(GRID_SEL);
+        const grid = getGrid();
         const allCards = Array.from(grid?.querySelectorAll(CARD_SEL) || []).filter(c => !c.closest('.lf-folder-card'));
         const allKeys = allCards.map(c => getCardKey(c)).filter(k => k);
 
@@ -167,7 +187,7 @@
         overlay.innerHTML = `
             <div id="lf-modal" onclick="event.stopPropagation()">
                 <h3>
-                    <span>⚙️ 통합 폴더 관리 v2.1.0</span>
+                    <span>⚙️ 통합 폴더 관리 v2.1.1</span>
                     <span style="font-size:11px; font-weight:normal; opacity:0.6;">(클릭 시 즉시 이동)</span>
                 </h3>
 
@@ -416,7 +436,7 @@
     }
 
     function renderAll() {
-        const grid = document.querySelector(GRID_SEL);
+        const grid = getGrid();
         if (!grid) return;
 
         const folders = getFolders();
@@ -486,7 +506,7 @@
     }
 
     function applySearch(query) {
-        const grid = document.querySelector(GRID_SEL);
+        const grid = getGrid();
         if (!grid) return;
         const assignedKeys = new Set(getFolders().flatMap(f => f.items));
 
@@ -554,19 +574,26 @@
     }
 
     function initUI() {
-        const titleElement = document.querySelector('.css-342uqh');
+        const titleElement = getTitleElement();
         if (!titleElement || document.getElementById('lf-sticky-header')) return;
+
+        // ⚠ 주의: titleElement는 React가 관리하는 노드이므로 절대 re-parent(이동)하지 않는다.
+        // 과거 버전은 titleElement.appendChild(...)로 노드를 직접 옮겼는데,
+        // 이렇게 되면 titleElement.parentNode가 React가 기억하는 부모와 달라져서
+        // 다음 리렌더링 시 React가 removeChild/insertBefore 호출 중
+        // "노드가 이 부모의 자식이 아님" 예외를 던지고, 해당 서브트리 전체를 갈아엎는다.
+        // → display:none으로 숨기기만 하고, 실제 보여줄 UI는 형제(sibling) 노드로 새로 만든다.
+        titleElement.style.display = 'none';
 
         const stickyWrap = document.createElement('div');
         stickyWrap.id = 'lf-sticky-header';
-        titleElement.parentNode.insertBefore(stickyWrap, titleElement);
-        stickyWrap.appendChild(titleElement);
+        titleElement.insertAdjacentElement('afterend', stickyWrap);
 
         const wrapper = document.createElement('div');
         wrapper.className = 'lf-header-container';
         const titleSpan = document.createElement('div');
         titleSpan.className = 'lf-header-title';
-        while(titleElement.firstChild) titleSpan.appendChild(titleElement.firstChild);
+        titleSpan.textContent = titleElement.textContent; // 노드 이동 대신 텍스트만 복제
 
         const manageBtn = document.createElement('button');
         manageBtn.className = 'lf-manage-btn';
@@ -574,7 +601,7 @@
         manageBtn.onclick = openManageModal;
 
         wrapper.appendChild(titleSpan); wrapper.appendChild(manageBtn);
-        titleElement.appendChild(wrapper);
+        stickyWrap.appendChild(wrapper);
 
         const searchWrap = document.createElement('div');
         searchWrap.className = 'lf-search-wrap';
@@ -592,24 +619,13 @@
     // 5. UI 정리 (페이지 이동 시)
     // ─────────────────────────────────────────────
     function cleanupUI() {
-        const stickyWrap = document.getElementById('lf-sticky-header');
-        if (stickyWrap) {
-            const titleElement = stickyWrap.querySelector('.css-342uqh');
-            if (titleElement) {
-                const titleSpan = titleElement.querySelector('.lf-header-title');
-                if (titleSpan) {
-                    while (titleSpan.firstChild) {
-                        titleElement.appendChild(titleSpan.firstChild);
-                    }
-                }
-                const wrapper = titleElement.querySelector('.lf-header-container');
-                if (wrapper) wrapper.remove();
-                stickyWrap.parentNode.insertBefore(titleElement, stickyWrap);
-            }
-            stickyWrap.remove();
-        }
+        const titleElement = getTitleElement();
+        if (titleElement) titleElement.style.display = '';
 
-        const grid = document.querySelector(GRID_SEL);
+        const stickyWrap = document.getElementById('lf-sticky-header');
+        if (stickyWrap) stickyWrap.remove();
+
+        const grid = getGrid();
         if (grid) {
             grid.querySelectorAll('.lf-folder-card').forEach(el => el.remove());
             grid.querySelector('#lf-scroll-spacer')?.remove();
@@ -633,7 +649,7 @@
 
         initUI();
 
-        const grid = document.querySelector(GRID_SEL);
+        const grid = getGrid();
         if (!grid) return;
 
         const cards = Array.from(grid.querySelectorAll(CARD_SEL))
