@@ -16,31 +16,17 @@
     // ─────────────────────────────────────────────
     const STORAGE_KEY = 'liked_folders_v1';
 
-    // v2.1.0 패치: 플랫폼 HTML 구조 변경 대응
-    // Emotion 해시 클래스 → Tailwind 클래스 기반으로 전환됨
-    // v2.1.1 패치: #liked-scroll 래퍼 ID가 플랫폼 업데이트로 제거됨(전체 페이지 스크롤 방식으로 전환 추정)
-    //              → 고정 ID 대신 getGrid() 함수로 폴백 체인 구성
-    const CARD_SEL   = ':scope > div[role="button"]';               // 개별 카드 (직접 자식만)
-    const TITLE_SEL  = 'p.line-clamp-2';                           // 작품 제목 텍스트
-    const TITLE_TEXT = '좋아요 목록';                                // 타이틀 식별용 텍스트(해시 클래스 불안정 대비)
-
-    // 작품 그리드 컨테이너 탐색 (해시/구조 변경에 대비한 폴백 체인)
-    function getGrid() {
-        // 1차: 구 구조 (#liked-scroll 래퍼가 추후 복원될 경우 대비)
-        let grid = document.querySelector('#liked-scroll div[class*="grid-cols-3"]');
-        if (grid) return grid;
-        // 2차: 현재(2026-06 기준) 구조 — 래퍼 ID 없이 grid-cols-3 클래스만 존재
-        return document.querySelector('div[class*="grid-cols-3"]');
-    }
-
-    // 타이틀 엘리먼트 탐색 (해시 클래스 우선, 텍스트 내용 폴백)
-    function getTitleElement() {
-        const byClass = document.querySelector('.css-342uqh');
-        if (byClass && byClass.textContent.trim() === TITLE_TEXT) return byClass;
-        return Array.from(document.querySelectorAll('p')).find(
-            p => p.children.length === 0 && p.textContent.trim() === TITLE_TEXT
-        ) || null;
-    }
+    // v2.1.0: Emotion 해시 클래스 → Tailwind 클래스 기반 전환
+    // v2.2.0: #liked-scroll 사라짐 → class 기반 매칭
+    // v2.3.0: #liked-scroll 재출현. 단 'div.grid[class*="grid-cols-3"]'가
+    //   모바일 네비게이션 헤더 격자(top-[64px], gap-5, items-center)를 DOM 순서상
+    //   먼저 매칭하는 문제 발생 -> gap-y-10 구별자 + #liked-scroll 스코프로 작품 격자만 매칭.
+    //   PAGE_TITLE_SEL 신설: .css-342uqh를 공유하는 배너('앱에서 더 편하게')가 DOM 순서상
+    //   앞이라 querySelector('.css-342uqh')가 배너를 반환 -> typo-text-2xl로 제목만 매칭.
+    const PAGE_TITLE_SEL = '#liked-scroll p[class*="typo-text-2xl"]'; // 페이지 제목
+    const GRID_SEL   = '#liked-scroll div.grid[class*="gap-y-10"]'; // 작품 그리드
+    const CARD_SEL   = ':scope > div[role="button"]';                // 개별 카드 (직접 자식만)
+    const TITLE_SEL  = 'p.line-clamp-2';                             // 작품 제목 텍스트
 
     const PATH_UNSAFE = "m20.7 4.47-8.3-2.68c-.26-.08-.54-.08-.8 0L3.3 4.47c-.54.18-.9.68-.9 1.24v4.12c0 5.74 3.69 10.81 9.18 12.61.13.05.28.07.42.07s.28-.02.42-.07c5.49-1.8 9.18-6.87 9.18-12.61V5.71c0-.56-.36-1.06-.9-1.24M12 6.28c1.83 0 3.31 1.48 3.31 3.31S13.83 12.9 12 12.9s-3.31-1.49-3.31-3.31S10.17 6.28 12 6.28m4.35 12a9 9 0 0 1-.58.51c-.03.03-.07.06-.11.08-.06.06-.13.12-.2.16-.06.06-.13.11-.2.15 0 .01-.01.01-.02.02l-.1.07c-.94.69-2 1.23-3.14 1.62-1.66-.55-3.12-1.45-4.34-2.61a9.3 9.3 0 0 1-1.09-1.17c1.42-1.34 3.67-1.83 5.41-1.83s4.02.49 5.44 1.83c-.32.41-.68.81-1.07 1.17";
 
@@ -69,12 +55,9 @@
             background-color: var(--bg_screen, #ffffff);
             padding: 16px 0 0 0; margin-top: -16px;
         }
-        #lf-sticky-header::before {
-            content: ""; position: absolute; bottom: 100%; left: 0; right: 0; height: 60px;
-            background-color: var(--bg_screen, #ffffff); pointer-events: none;
-        }
-        .lf-header-container { display: flex; justify-content: space-between; align-items: center; width: 100%; }
-        .lf-header-title { display: flex; align-items: center; gap: 10px; flex: 1; }
+        /* v2.3.1: ::before 오버레이 제거 — 형제 노드 구조에서 제목을 덮는 원인이었음 */
+        .lf-header-container { display: flex; justify-content: space-between; align-items: center; width: 100%; padding-top: 6px; }
+        .lf-header-title-text { font-size: 20px; font-weight: 700; color: var(--text_primary, #000); line-height: 1; }
         .lf-manage-btn {
             padding: 6px 14px; background: rgba(125,125,125,.15); border: none; border-radius: 8px;
             font-size: 13px; font-weight: bold; cursor: pointer; color: inherit;
@@ -178,7 +161,7 @@
         let folders = getFolders();
         let currentFolderId = folders.length > 0 ? folders[0].id : null;
 
-        const grid = getGrid();
+        const grid = document.querySelector(GRID_SEL);
         const allCards = Array.from(grid?.querySelectorAll(CARD_SEL) || []).filter(c => !c.closest('.lf-folder-card'));
         const allKeys = allCards.map(c => getCardKey(c)).filter(k => k);
 
@@ -187,7 +170,7 @@
         overlay.innerHTML = `
             <div id="lf-modal" onclick="event.stopPropagation()">
                 <h3>
-                    <span>⚙️ 통합 폴더 관리 v2.1.1</span>
+                    <span>⚙️ 통합 폴더 관리 v2.3.1</span>
                     <span style="font-size:11px; font-weight:normal; opacity:0.6;">(클릭 시 즉시 이동)</span>
                 </h3>
 
@@ -436,7 +419,7 @@
     }
 
     function renderAll() {
-        const grid = getGrid();
+        const grid = document.querySelector(GRID_SEL);
         if (!grid) return;
 
         const folders = getFolders();
@@ -506,7 +489,7 @@
     }
 
     function applySearch(query) {
-        const grid = getGrid();
+        const grid = document.querySelector(GRID_SEL);
         if (!grid) return;
         const assignedKeys = new Set(getFolders().flatMap(f => f.items));
 
@@ -574,58 +557,47 @@
     }
 
     function initUI() {
-        const titleElement = getTitleElement();
+        const titleElement = document.querySelector(PAGE_TITLE_SEL);
         if (!titleElement || document.getElementById('lf-sticky-header')) return;
 
-        // ⚠ 주의: titleElement는 React가 관리하는 노드이므로 절대 re-parent(이동)하지 않는다.
-        // 과거 버전은 titleElement.appendChild(...)로 노드를 직접 옮겼는데,
-        // 이렇게 되면 titleElement.parentNode가 React가 기억하는 부모와 달라져서
-        // 다음 리렌더링 시 React가 removeChild/insertBefore 호출 중
-        // "노드가 이 부모의 자식이 아님" 예외를 던지고, 해당 서브트리 전체를 갈아엎는다.
-        // → display:none으로 숨기기만 하고, 실제 보여줄 UI는 형제(sibling) 노드로 새로 만든다.
-        titleElement.style.display = 'none';
-
+        // ⚠️ v2.1.0 이하 구조: titleElement(React 관리 노드)를 wrapper div 안으로 이동시킴.
+        //   → 신규 탭(스토리/캐릭터/나만의 태그) UI 추가로 이 영역의 리렌더링 빈도가 늘면서,
+        //     React reconciliation이 기대 위치(title 직속)에 다른 태그(div)가 있는 것을 감지 →
+        //     서브트리를 통째로 버리고 title을 새로 생성 → 주입했던 UI 전체가 함께 삭제되는 것으로 추정.
+        //     (정적 캡처상 css-342uqh title이 스크립트 흔적 전혀 없는 순수 상태로 존재 — 정황 증거)
+        // ✅ v2.2.0: titleElement는 절대 이동·래핑하지 않고 형제 노드로만 삽입 → 재조정 충돌 원천 차단.
         const stickyWrap = document.createElement('div');
         stickyWrap.id = 'lf-sticky-header';
+        stickyWrap.innerHTML = `
+            <div class="lf-header-container">
+                <span class="lf-header-title-text">${titleElement.textContent.trim()}</span>
+                <button class="lf-manage-btn">⚙️ 폴더 관리</button>
+            </div>
+            <div class="lf-search-wrap">
+                <input type="text" id="lf-search-input" class="lf-search-input" placeholder="작품 제목으로 검색...">
+            </div>
+        `;
         titleElement.insertAdjacentElement('afterend', stickyWrap);
+        // 원본 <p>는 DOM에 그대로 두되 숨김(display:none은 React가 되돌리지 않음).
+        // sticky header 안의 복사본이 제목 역할을 대신하므로 중복 표시 방지.
+        titleElement.style.display = 'none';
 
-        const wrapper = document.createElement('div');
-        wrapper.className = 'lf-header-container';
-        const titleSpan = document.createElement('div');
-        titleSpan.className = 'lf-header-title';
-        titleSpan.textContent = titleElement.textContent; // 노드 이동 대신 텍스트만 복제
-
-        const manageBtn = document.createElement('button');
-        manageBtn.className = 'lf-manage-btn';
-        manageBtn.textContent = '⚙️ 폴더 관리';
-        manageBtn.onclick = openManageModal;
-
-        wrapper.appendChild(titleSpan); wrapper.appendChild(manageBtn);
-        stickyWrap.appendChild(wrapper);
-
-        const searchWrap = document.createElement('div');
-        searchWrap.className = 'lf-search-wrap';
-        const searchInput = document.createElement('input');
-        searchInput.id = 'lf-search-input';
-        searchInput.className = 'lf-search-input';
-        searchInput.placeholder = '작품 제목으로 검색...';
-        searchWrap.appendChild(searchInput);
-        stickyWrap.appendChild(searchWrap);
-
-        searchInput.oninput = e => applySearch(e.target.value.toLowerCase().trim());
+        stickyWrap.querySelector('.lf-manage-btn').onclick = openManageModal;
+        stickyWrap.querySelector('#lf-search-input').oninput = e => applySearch(e.target.value.toLowerCase().trim());
     }
 
     // ─────────────────────────────────────────────
     // 5. UI 정리 (페이지 이동 시)
     // ─────────────────────────────────────────────
     function cleanupUI() {
-        const titleElement = getTitleElement();
-        if (titleElement) titleElement.style.display = '';
+        // v2.2.0: titleElement를 더 이상 이동/래핑하지 않으므로 복원 로직 불필요.
+        //         형제 노드로 삽입했던 헤더만 제거하면 원본 DOM은 항상 그대로 보존됨.
+        // v2.3.1: display:none 처리한 원본 <p>를 복원.
+        document.getElementById('lf-sticky-header')?.remove();
+        const pageTitle = document.querySelector(PAGE_TITLE_SEL);
+        if (pageTitle) pageTitle.style.display = '';
 
-        const stickyWrap = document.getElementById('lf-sticky-header');
-        if (stickyWrap) stickyWrap.remove();
-
-        const grid = getGrid();
+        const grid = document.querySelector(GRID_SEL);
         if (grid) {
             grid.querySelectorAll('.lf-folder-card').forEach(el => el.remove());
             grid.querySelector('#lf-scroll-spacer')?.remove();
@@ -649,7 +621,7 @@
 
         initUI();
 
-        const grid = getGrid();
+        const grid = document.querySelector(GRID_SEL);
         if (!grid) return;
 
         const cards = Array.from(grid.querySelectorAll(CARD_SEL))
