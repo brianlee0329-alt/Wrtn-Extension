@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         좋아요 목록 관리
 // @namespace    https://github.com/workforomg/Util
-// @version      2.0.3
+// @version      2.0.4
 // @description  좋아요 목록 검색/폴더 기능 지원
 // @match        https://crack.wrtn.ai/liked*
 // @grant        GM_addStyle
@@ -55,7 +55,17 @@
             background-color: var(--bg_screen, #ffffff);
             padding: 16px 0 0 0; margin-top: -16px;
         }
-        /* v2.3.1: ::before 오버레이 제거 — 형제 노드 구조에서 제목을 덮는 원인이었음 */
+        /* v2.3.1: ::before 제거했었으나, 원본 <p>가 display:none 처리됐으므로 복원해도 무관.
+           복원하지 않으면 sticky 고정 시 상단 여백 너머로 컨텐츠가 비쳐보임. */
+        #lf-sticky-header::before {
+            content: ""; position: absolute; bottom: 100%; left: 0; right: 0;
+            height: 200px; background-color: var(--bg_screen, #ffffff); pointer-events: none;
+        }
+        /* v2.3.2: 탭바 컨테이너(sticky-header 직후 형제)가 DOM 순서상 나중에 오므로
+           기본 stacking order에 의해 z-index:10인 sticky-header를 덮어버림.
+           형제에 position:relative + z-index:1을 주어 명시적 stacking context를 생성,
+           sticky-header(z-index:10)가 항상 위에 오도록 역전. */
+        #lf-sticky-header + * { position: relative; z-index: 1; }
         .lf-header-container { display: flex; justify-content: space-between; align-items: center; width: 100%; padding-top: 6px; }
         .lf-header-title-text { font-size: 20px; font-weight: 700; color: var(--text_primary, #000); line-height: 1; }
         .lf-manage-btn {
@@ -170,7 +180,7 @@
         overlay.innerHTML = `
             <div id="lf-modal" onclick="event.stopPropagation()">
                 <h3>
-                    <span>⚙️ 통합 폴더 관리 v2.3.1</span>
+                    <span>⚙️ 통합 폴더 관리 v2.3.2</span>
                     <span style="font-size:11px; font-weight:normal; opacity:0.6;">(클릭 시 즉시 이동)</span>
                 </h3>
 
