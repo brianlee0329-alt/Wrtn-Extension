@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crack 레이아웃 조절기
 // @namespace    https://github.com/local/crack-layout
-// @version      1.5.9
+// @version      1.6.0
 // @description  채팅창 너비 조절 + 컴팩트 모드
 // @author       Tyme
 // @match        https://crack.wrtn.ai/stories/*
@@ -145,6 +145,14 @@
     //    · 두 모달 내부 블록을 :has()+grid-template-columns: auto-fit/minmax로
     //      "충분한 너비가 되면 자동 2열(1,2 / 3,4) reflow" 처리
     //      (모달 폭이 좁으면 1열 유지, 슬라이더로 넓히면 자연스럽게 2열로 전환 — 별도 breakpoint 불필요)
+    //  변경(v1.6.0):
+    //    · 대화 프로필 모달 플랫폼 구조 변경 대응
+    //      - 기존: #web-modal 내부, 커스텀 width="444px" HTML 속성 보유
+    //      - 변경: 표준 Radix Dialog(role="dialog")로 교체, width 속성 소멸,
+    //        대신 max-w-[444px] Tailwind 클래스로 폭 지정 (출력량 조절 모달과 동일 패턴)
+    //      - #web-modal 래퍼 존재 여부가 불확실해짐 → id 의존 제거, role="dialog" 속성 기반으로 전환
+    //      - 출력량 조절 모달과 max-w-[444px] 클래스를 공유하므로 max-h-[85dvh] 부재로 구분
+    //    · 카드 블럭 grid selector: cursor="pointer" 속성 → cursor-pointer 클래스로 변경 대응
     // =========================================================================
 
     // ── 설정 ─────────────────────────────────────────────────────────────────
@@ -262,8 +270,11 @@
                 margin: 0 auto !important;
             }
 
-            /* ── 대화 프로필 모달 너비 (HTML width 속성 selector, 해시 클래스 비의존) ── */
-            #web-modal div[width="444px"] {
+            /* ── 대화 프로필 모달 너비 ──
+               v1.6.0: width="444px" 속성 → max-w-[444px] 클래스로 대체됨.
+               출력량 조절 모달과 max-w-[444px]를 공유하므로 max-h-[85dvh] 부재로 구분.
+               (class*="..." 는 속성 문자열 내부 매칭이라 대괄호 이스케이프 불필요) */
+            div[role="dialog"][class*="max-w-[444px]"]:not([class*="max-h-[85dvh]"]) {
                 width: ${CFG.profileWidth}px !important;
                 max-width: ${CFG.profileWidth}px !important;
             }
@@ -276,8 +287,9 @@
                 max-width: ${CFG.outputWidth}px !important;
             }
 
-            /* ── 대화 프로필 모달: 카드 블럭 자동 2열 grid (좁으면 1열 유지) ── */
-            #web-modal div:has(> div[cursor="pointer"]) {
+            /* ── 대화 프로필 모달: 카드 블럭 자동 2열 grid (좁으면 1열 유지) ──
+               v1.6.0: cursor="pointer" 속성 → cursor-pointer 클래스로 변경됨에 따라 수정 */
+            div[role="dialog"][class*="max-w-[444px]"]:not([class*="max-h-[85dvh]"]) div:has(> div.cursor-pointer) {
                 display: grid !important;
                 grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)) !important;
                 gap: 10px 14px !important;
