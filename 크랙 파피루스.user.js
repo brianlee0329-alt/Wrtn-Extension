@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         크랙 파피루스
-// @version      1.0.3
+// @version      1.0.4
 // @description  유저노트 저장/불러오기 + 페르소나 순서 드래그 변경 + 페르소나 선택을 버튼 행 위로 이식 (통합 빌드 / GC 억제 적용)
 // @author       milkyway0308
 // @match        https://crack.wrtn.ai/*
@@ -979,33 +979,46 @@ function _makeThrottle(fn, wait) {
   }
 
   function getPersonaName(itemEl) {
-    return itemEl.querySelector('p.typo-text-base_leading-none_semibold')
+    // 플랫폼이 이름 요소를 <p> → <span>으로 교체할 수 있으므로 양쪽 모두 탐색
+    return itemEl.querySelector(':is(p, span).typo-text-base_leading-none_semibold')
       ?.textContent?.trim() ?? '';
   }
 
   function getPersonaItems(wrapperEl) {
-    const byCursor = Array.from(
-      wrapperEl.querySelectorAll(':scope > div[cursor="pointer"]')
+    // 구버전: cursor="pointer" HTML 속성 (Emotion CSS 시절)
+    const byAttr = Array.from(wrapperEl.querySelectorAll(':scope > div[cursor="pointer"]'));
+    if (byAttr.length) return byAttr;
+    // 신버전: cursor-pointer Tailwind 클래스 (Radix/Tailwind 리팩터 이후)
+    const byClass = Array.from(wrapperEl.querySelectorAll(':scope > div.cursor-pointer'));
+    if (byClass.length) return byClass;
+    // 최후 폴백: 이름 요소(<p> 또는 <span>)가 존재하는 div
+    return Array.from(wrapperEl.querySelectorAll(':scope > div')).filter(
+      d => d.querySelector(':is(p, span).typo-text-base_leading-none_semibold')
     );
-    return byCursor.length
-      ? byCursor
-      : Array.from(wrapperEl.querySelectorAll(':scope > div')).filter(
-          d => d.querySelector('p.typo-text-base_leading-none_semibold')
-        );
   }
 
   function findItemWrapper(root) {
-    const first = root.querySelector('div[cursor="pointer"]');
-    return first?.parentElement ?? null;
+    // 구버전: cursor="pointer" HTML 속성
+    const byAttr = root.querySelector('div[cursor="pointer"]');
+    if (byAttr) return byAttr.parentElement ?? null;
+    // 신버전: cursor-pointer + bg-surface_tertiary Tailwind 클래스 (카드 컨테이너)
+    const byClass = root.querySelector('div.cursor-pointer.bg-surface_tertiary');
+    return byClass?.parentElement ?? null;
   }
 
   // ── A. 채팅 모달 탐색 ─────────────────────────────────────────
   function findChatModal() {
+    // 신버전: Radix Dialog 기반 — <h2> 헤더 + div[role="dialog"] 컨테이너
+    for (const h of document.querySelectorAll('h2')) {
+      if (h.textContent.trim() !== '대화 프로필') continue;
+      const modal = h.closest('div[role="dialog"]');
+      if (modal && isVisible(modal)) return modal;
+    }
+    // 구버전 폴백: Emotion CSS — <p> 헤더 + div[width="444px"] 컨테이너
     for (const p of document.querySelectorAll('p.typo-text-xl_leading-none_semibold')) {
-      if (p.textContent.trim() === '대화 프로필') {
-        const modal = p.closest('div[width="444px"]');
-        if (modal && isVisible(modal)) return modal;
-      }
+      if (p.textContent.trim() !== '대화 프로필') continue;
+      const modal = p.closest('div[width="444px"]');
+      if (modal && isVisible(modal)) return modal;
     }
     return null;
   }
@@ -1063,6 +1076,10 @@ function _makeThrottle(fn, wait) {
       title: '드래그하여 순서 변경',
     });
     Object.assign(handle.style, {
+      // 채팅 세션 관리 스크립트가 .crack-drag-handle에 전역으로
+      // position:absolute를 주입함. 인라인 스타일로 static 강제
+      // → left/top/bottom/width도 static 맥락에서 무효화됨.
+      position: 'static',
       cursor: 'grab', fontSize: '17px',
       color: 'var(--icon_primary, #888)', opacity: '0.4',
       padding: '0 8px 0 2px', flexShrink: '0',
@@ -1100,7 +1117,10 @@ function _makeThrottle(fn, wait) {
       e.preventDefault();
       if (dragSrc && dragSrc !== item) item.style.outline = '2px solid #9c27b0';
     });
-    item.addEventListener('dragleave', () => { item.style.outline = ''; });
+    item.addEventListener('dragleave', e => {
+      // 자식 요소로 이동 시 outline 깜빡임 방지: 실제로 item 영역을 벗어날 때만 제거
+      if (!item.contains(e.relatedTarget)) item.style.outline = '';
+    });
     item.addEventListener('drop', e => {
       e.preventDefault(); e.stopPropagation();
       item.style.outline = '';
@@ -1118,7 +1138,13 @@ function _makeThrottle(fn, wait) {
       reordered.forEach((el, i) => { el.style.order = String(i); });
     });
 
-    const nameRow = item.querySelector('div[display="flex"]') ?? item.firstElementChild;
+    // 이름 요소(span 또는 p)를 직접 찾아 그 부모를 삽입 대상으로 사용.
+    // DOM 깊이(firstElementChild 체인)에 의존하지 않으므로 플랫폼 구조 변경에 강함.
+    // 구버전(div[display="flex"] 속성) / 신버전(Tailwind flex 클래스) 모두 커버.
+    const nameEl  = item.querySelector(':is(p, span).typo-text-base_leading-none_semibold');
+    const nameRow = nameEl?.parentElement
+      ?? item.querySelector('div[display="flex"]')
+      ?? item.firstElementChild;
     if (nameRow) nameRow.insertBefore(handle, nameRow.firstChild);
   }
 
