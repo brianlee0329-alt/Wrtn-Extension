@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         채팅 세션 관리
 // @namespace    https://github.com/workforomg/Utill
-// @version      3.1.2
+// @version      3.1.3
 // @description  보관함/채팅 목록 탭 분리 + 검색/메모/이어하기/이름 애니메이션 + 보관함 카테고리 통합
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
@@ -76,6 +76,12 @@
     function cacheSession(href, title) {
         if (!href || !title) return;
         const c = getCache();
+        // [v3.1.3] 버그 A 수정: "이름 없는 세션"으로 유효한 기존 제목을 덮어쓰지 않음.
+        // Virtuoso 초기 렌더 시 span.typo-text-sm_leading-none_medium 이 DOM에
+        // 존재하지만 React 수화(hydration) 전이라 textContent가 비어있는 타이밍에
+        // injectMemoUI가 실행되면 extractTitle이 "이름 없는 세션"을 반환한다.
+        // 이 값이 유효한 기존 캐시 제목을 덮어쓰는 것을 원천 차단.
+        if (title === '이름 없는 세션' && c[href]?.title && c[href].title !== '이름 없는 세션') return;
         if (!c[href] || c[href].title !== title) {
             c[href] = { title, ts: Date.now() };
             localStorage.setItem(CACHE_KEY, JSON.stringify(c));
@@ -1189,7 +1195,13 @@
         document.querySelectorAll(`${SEL_LINK}:not([data-crack-memo])`).forEach(link => {
             const href = link.getAttribute('href');
             if (!href) return;
-            cacheSession(href, extractTitle(link));
+
+            // [v3.1.3] 버그 B 수정: 제목을 먼저 추출한 뒤, 유효할 때만 data-crack-memo 확정.
+            // "이름 없는 세션"이면 다음 tick에서 React 수화 완료 후 올바른 제목을
+            // 재추출할 기회를 준다. 무한 재시도 방지를 위해 data-crack-memo-retry
+            // 카운터가 5를 초과하면 포기하고 강제 확정한다.
+            const title = extractTitle(link);
+            cacheSession(href, title);
 
             const moreBtn = link.querySelector(SEL_MORE_BTN);
             if (!moreBtn) return;
@@ -1215,8 +1227,20 @@
                 contentArea.appendChild(preview);
             }
 
-            link.setAttribute('data-crack-memo', '1');
-            hadNew = true;
+            if (title !== '이름 없는 세션') {
+                // 유효한 제목을 얻었을 때만 처리 완료로 확정
+                link.setAttribute('data-crack-memo', '1');
+                hadNew = true;
+            } else {
+                // 제목 미확보: 재시도 카운터 증가. 5회 초과 시 포기하고 강제 확정
+                // (무한 재처리 방지 — moreBtn은 존재하므로 UI 주입은 이미 완료됨)
+                const retries = parseInt(link.getAttribute('data-crack-memo-retry') || '0', 10);
+                if (retries >= 5) {
+                    link.setAttribute('data-crack-memo', '1');
+                } else {
+                    link.setAttribute('data-crack-memo-retry', String(retries + 1));
+                }
+            }
         });
 
         // 새로 삽입된 링크가 있을 때만 전체 preview 갱신.
@@ -1264,18 +1288,53 @@
     function getSessionsForStory(storyId) {
         const pattern = `/stories/${storyId}/episodes/`;
         const seen = new Set(), results = [];
-        Object.entries(getCache()).forEach(([href, info]) => {
-            if (href.includes(pattern) && !seen.has(href)) {
-                seen.add(href);
-                results.push({ href, name: info.title || href.split('/').pop() });
-            }
-        });
+
+        // [v3.1.3] 버그 C 수정: DOM 우선 수집.
+        // 기존 캐시-우선 방식은 seen.add()가 캐시 순회 단계에서 먼저 등록되어,
+        // 해당 href가 현재 DOM에 있더라도 DOM 제목 추출이 완전히 스킵됐음.
+        // → DOM에서 먼저 제목을 수집하고, 캐시는 DOM에 없는 세션(가상 스크롤
+        //   밖에 있는 오래된 세션)에 대해서만 폴백으로 사용한다.
+        const domTitles = new Map();
         document.querySelectorAll(`a[href*="${pattern}"]`).forEach(a => {
             const h = a.getAttribute('href');
-            if (!h || seen.has(h)) return;
-            seen.add(h);
-            results.push({ href: h, name: extractTitle(a) });
+            if (!h) return;
+            domTitles.set(h, extractTitle(a));
         });
+
+        // 스토리 상세 페이지에서 스토리 제목 추출.
+        // Virtuoso 가상 스크롤 밖에 있어 DOM에도 없는 오래된 세션(캐시에
+        // "이름 없는 세션"으로 오염된 항목)의 보정용 폴백으로 사용한다.
+        // "/detail/{storyId}" 링크는 스토리 상세 페이지에서만 존재하므로,
+        // 다른 페이지에서는 null이 되어 폴백 없이 기존 캐시 값이 그대로 사용됨.
+        const pageStoryTitle =
+            document.querySelector(`a[href="/detail/${storyId}"] p`)?.textContent?.trim() || null;
+
+        // 캐시 전체 순회 (가상 스크롤 밖 세션 포함)
+        Object.entries(getCache()).forEach(([href, info]) => {
+            if (!href.includes(pattern) || seen.has(href)) return;
+            seen.add(href);
+            const domTitle = domTitles.get(href);
+            let name = info.title || href.split('/').pop();
+            if (domTitle && domTitle !== '이름 없는 세션') {
+                // DOM에 유효한 제목이 있으면 무조건 사용 + 오염된 캐시 수정
+                if (name !== domTitle) cacheSession(href, domTitle);
+                name = domTitle;
+            } else if (name === '이름 없는 세션' && pageStoryTitle) {
+                // DOM에도 없고 캐시도 "이름 없는 세션"이면 스토리 제목으로 보정 + 캐시 수정
+                cacheSession(href, pageStoryTitle);
+                name = pageStoryTitle;
+            }
+            results.push({ href, name });
+        });
+
+        // 캐시에 없는 DOM 세션 추가 (신규 세션 또는 캐시 미등록 세션)
+        domTitles.forEach((name, href) => {
+            if (!seen.has(href)) {
+                seen.add(href);
+                results.push({ href, name });
+            }
+        });
+
         return results;
     }
 
