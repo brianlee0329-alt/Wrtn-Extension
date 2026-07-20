@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         좋아요 목록 관리
 // @namespace    https://github.com/workforomg/Util
-// @version      2.0.4
+// @version      2.0.5
 // @description  좋아요 목록 검색/폴더 기능 지원
 // @match        https://crack.wrtn.ai/liked*
 // @grant        GM_addStyle
@@ -16,9 +16,9 @@
     // ─────────────────────────────────────────────
     const STORAGE_KEY = 'liked_folders_v1';
 
-    // v2.1.0: Emotion 해시 클래스 → Tailwind 클래스 기반 전환
-    // v2.2.0: #liked-scroll 사라짐 → class 기반 매칭
-    // v2.3.0: #liked-scroll 재출현. 단 'div.grid[class*="grid-cols-3"]'가
+    // v1.1.0: Emotion 해시 클래스 → Tailwind 클래스 기반 전환
+    // v1.2.0: #liked-scroll 사라짐 → class 기반 매칭
+    // v1.3.0: #liked-scroll 재출현. 단 'div.grid[class*="grid-cols-3"]'가
     //   모바일 네비게이션 헤더 격자(top-[64px], gap-5, items-center)를 DOM 순서상
     //   먼저 매칭하는 문제 발생 -> gap-y-10 구별자 + #liked-scroll 스코프로 작품 격자만 매칭.
     //   PAGE_TITLE_SEL 신설: .css-342uqh를 공유하는 배너('앱에서 더 편하게')가 DOM 순서상
@@ -55,13 +55,13 @@
             background-color: var(--bg_screen, #ffffff);
             padding: 16px 0 0 0; margin-top: -16px;
         }
-        /* v2.3.1: ::before 제거했었으나, 원본 <p>가 display:none 처리됐으므로 복원해도 무관.
+        /* v1.3.1: ::before 제거했었으나, 원본 <p>가 display:none 처리됐으므로 복원해도 무관.
            복원하지 않으면 sticky 고정 시 상단 여백 너머로 컨텐츠가 비쳐보임. */
         #lf-sticky-header::before {
             content: ""; position: absolute; bottom: 100%; left: 0; right: 0;
             height: 200px; background-color: var(--bg_screen, #ffffff); pointer-events: none;
         }
-        /* v2.3.2: 탭바 컨테이너(sticky-header 직후 형제)가 DOM 순서상 나중에 오므로
+        /* v1.3.2: 탭바 컨테이너(sticky-header 직후 형제)가 DOM 순서상 나중에 오므로
            기본 stacking order에 의해 z-index:10인 sticky-header를 덮어버림.
            형제에 position:relative + z-index:1을 주어 명시적 stacking context를 생성,
            sticky-header(z-index:10)가 항상 위에 오도록 역전. */
@@ -89,7 +89,7 @@
             background: var(--bg_secondary, rgba(125,125,125,0.05));
             border: 1px solid var(--outline_tertiary, rgba(125,125,125,0.2));
             border-radius: 16px; cursor: pointer; transition: all 0.2s ease;
-            display: flex; flex-direction: column; overflow: hidden; height: 100%; min-height: 120px;
+            display: flex; flex-direction: column; overflow: hidden; height: auto; min-height: 120px; align-self: start; /* 같은 행의 작품 카드 높이에 맞춰 늘어나지 않도록 */
         }
         .lf-folder-card.expanded { grid-column: 1 / -1; height: auto; border-color: #fb475d; }
         .lf-folder-summary {
@@ -106,6 +106,14 @@
         .lf-folder-detail { display: none; padding: 20px; background: rgba(0,0,0,0.02); }
         .lf-folder-card.expanded > .lf-folder-detail { display: block; }
         .lf-folder-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
+
+        /* 미분류 신규 카드가 폴더 카드보다 앞(위)에 나타나는 문제 수정.
+           DOM 순서: [신규카드(index 0)][기존카드(hidden)...][폴더카드...]
+           CSS order로 시각적 순서를 역전: 폴더(order:0) → 작품 카드(order:1).
+           React 관리 노드를 물리적으로 이동하지 않으므로 reconciliation 충돌 없음.
+           > (직접 자식 한정) 사용 → 폴더 내부 그리드(.lf-folder-grid) 안의
+           role=button 카드에는 적용되지 않음. */
+        #liked-scroll div.grid[class*="gap-y-10"] > div[role="button"] { order: 1; }
 
         #lf-modal-overlay {
             position: fixed; inset: 0; background: rgba(0,0,0,.5);
@@ -180,7 +188,7 @@
         overlay.innerHTML = `
             <div id="lf-modal" onclick="event.stopPropagation()">
                 <h3>
-                    <span>⚙️ 통합 폴더 관리 v2.3.2</span>
+                    <span>⚙️ 통합 폴더 관리 v2.0.5</span>
                     <span style="font-size:11px; font-weight:normal; opacity:0.6;">(클릭 시 즉시 이동)</span>
                 </h3>
 
@@ -238,14 +246,35 @@
                 selectEl.innerHTML = '<option value="">폴더를 먼저 생성해주세요</option>';
                 currentFolderId = null;
             } else {
-                folders.forEach((f) => {
-                    const prefix = f.parentId ? 'ㄴ ' : '';
-                    const opt = document.createElement('option');
-                    opt.value = f.id;
-                    opt.textContent = `${prefix}${f.name} (${f.items.length})`;
-                    if (f.id === currentFolderId) opt.selected = true;
-                    selectEl.appendChild(opt);
+                // 루트 폴더별로 <optgroup>으로 묶어 구분선 삽입
+                // - optgroup label = 루트 폴더명 (비선택 헤더 역할)
+                // - 루트 폴더 자체 + 직계 자식을 같은 그룹 안에 배치
+                const roots = folders.filter(f => !f.parentId);
+                const childMap = {};
+                folders.filter(f => f.parentId).forEach(f => {
+                    (childMap[f.parentId] ??= []).push(f);
                 });
+                roots.forEach(root => {
+                    const grp = document.createElement('optgroup');
+                    grp.label = `📁 ${root.name}`;
+
+                    const rootOpt = document.createElement('option');
+                    rootOpt.value = root.id;
+                    rootOpt.textContent = `${root.name} (${root.items.length})`;
+                    if (root.id === currentFolderId) rootOpt.selected = true;
+                    grp.appendChild(rootOpt);
+
+                    (childMap[root.id] || []).forEach(child => {
+                        const childOpt = document.createElement('option');
+                        childOpt.value = child.id;
+                        childOpt.textContent = `  ㄴ ${child.name} (${child.items.length})`;
+                        if (child.id === currentFolderId) childOpt.selected = true;
+                        grp.appendChild(childOpt);
+                    });
+
+                    selectEl.appendChild(grp);
+                });
+
                 if (!currentFolderId) currentFolderId = folders[0].id;
             }
 
@@ -353,7 +382,14 @@
                     const parentIndex = folders.findIndex(f => f.id === newParentId);
 
                     if (parentIndex !== -1) {
-                        folders.splice(parentIndex + 1, 0, movedFolder);
+                        // parentIndex+1에 바로 삽입하면 기존 직계 자식들보다 앞에 끼어들어
+                        // 모달 목록 상 순서가 맨 위로 올라가는 것처럼 보임.
+                        // 기존 직계 자식을 모두 건너뛴 뒤 맨 마지막 자리에 삽입.
+                        let insertAt = parentIndex + 1;
+                        while (insertAt < folders.length && folders[insertAt].parentId === newParentId) {
+                            insertAt++;
+                        }
+                        folders.splice(insertAt, 0, movedFolder);
                     } else {
                         folders.push(movedFolder);
                     }
@@ -459,7 +495,7 @@
                 <div class="lf-folder-summary">
                     <span class="icon">📁</span>
                     <span class="title">${folderData.name}</span>
-                    <span class="count">${folderCards.length}개 작품 / ${subFolders.length}개 폴더</span>
+                    <span class="count">${folderCards.length}개 작품<br>${subFolders.length}개 폴더</span>
                 </div>
                 <div class="lf-folder-detail">
                     <div class="lf-folder-grid"></div>
@@ -485,10 +521,10 @@
                 folderBlock.classList.toggle('expanded');
             };
 
-            parentGrid.insertBefore(folderBlock, parentGrid.firstChild);
+            parentGrid.appendChild(folderBlock); // insertBefore 패턴을 버리고 appendChild로 교체 → 배열 순서 = 렌더 순서
         }
 
-        folders.filter(f => !f.parentId).slice().reverse().forEach(rootFolder => {
+        folders.filter(f => !f.parentId).forEach(rootFolder => { // .reverse() 제거: appendChild로 변경했으므로 역순 보정 불필요
             createFolderElement(rootFolder, grid);
         });
 
@@ -570,12 +606,12 @@
         const titleElement = document.querySelector(PAGE_TITLE_SEL);
         if (!titleElement || document.getElementById('lf-sticky-header')) return;
 
-        // ⚠️ v2.1.0 이하 구조: titleElement(React 관리 노드)를 wrapper div 안으로 이동시킴.
+        // ⚠️ v1.1.0 이하 구조: titleElement(React 관리 노드)를 wrapper div 안으로 이동시킴.
         //   → 신규 탭(스토리/캐릭터/나만의 태그) UI 추가로 이 영역의 리렌더링 빈도가 늘면서,
         //     React reconciliation이 기대 위치(title 직속)에 다른 태그(div)가 있는 것을 감지 →
         //     서브트리를 통째로 버리고 title을 새로 생성 → 주입했던 UI 전체가 함께 삭제되는 것으로 추정.
         //     (정적 캡처상 css-342uqh title이 스크립트 흔적 전혀 없는 순수 상태로 존재 — 정황 증거)
-        // ✅ v2.2.0: titleElement는 절대 이동·래핑하지 않고 형제 노드로만 삽입 → 재조정 충돌 원천 차단.
+        // ✅ v1.2.0: titleElement는 절대 이동·래핑하지 않고 형제 노드로만 삽입 → 재조정 충돌 원천 차단.
         const stickyWrap = document.createElement('div');
         stickyWrap.id = 'lf-sticky-header';
         stickyWrap.innerHTML = `
@@ -600,9 +636,9 @@
     // 5. UI 정리 (페이지 이동 시)
     // ─────────────────────────────────────────────
     function cleanupUI() {
-        // v2.2.0: titleElement를 더 이상 이동/래핑하지 않으므로 복원 로직 불필요.
+        // v1.2.0: titleElement를 더 이상 이동/래핑하지 않으므로 복원 로직 불필요.
         //         형제 노드로 삽입했던 헤더만 제거하면 원본 DOM은 항상 그대로 보존됨.
-        // v2.3.1: display:none 처리한 원본 <p>를 복원.
+        // v1.3.1: display:none 처리한 원본 <p>를 복원.
         document.getElementById('lf-sticky-header')?.remove();
         const pageTitle = document.querySelector(PAGE_TITLE_SEL);
         if (pageTitle) pageTitle.style.display = '';
