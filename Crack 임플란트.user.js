@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crack 임플란트
 // @namespace    https://crack.wrtn.ai
-// @version      2.1.1
+// @version      2.1.2
 // @description  카드 이미지에 0.8초 호버 → 말풍선 / 메인 페이지 모달 억제 / 나만의 태그 (말풍선·모달·작품페이지) / 좋아요 페이지 나만의 태그 탭 | v2.2.0: 웹모달 id=web-modal 소멸 대응
 // @match        https://crack.wrtn.ai/*
 // @grant        none
@@ -295,7 +295,7 @@
   function _handleModalNode(node) {
     // ── 플랫폼 상세 모달 캐싱 ──
     // 모달 감지 체인 — 구 선택자(web-modal, css-jmmlw3) + 신 선택자(Radix dialog) 병행
-  // v2.2.0: 플랫폼이 id="web-modal" / Emotion CSS 해시를 제거하고
+  // v2.1.1: 플랫폼이 id="web-modal" / Emotion CSS 해시를 제거하고
   //         role="dialog"[data-state="open"] + character-info-modal-content-body 구조로 전환됨
   const modal =
       // ── 레거시 감지 (혹시 복구 시 대비) ──
@@ -1082,26 +1082,62 @@
     return `<span class="crk-stat"><span class="crk-si">${icon}</span>${_esc(String(val))}</span>`;
   }
 
+  // v2.1.2: 링크 이미지 [![alt](img)](link) 대응 + src/href 속성 이스케이프 수정
+  //   - 우선순위 1: [![alt](img_url)](link_url) → 클릭 시 link_url 새탭 열기
+  //   - 우선순위 2: ![alt](url)               → 클릭 시 url(이미지 자체) 새탭 열기
+  //   - URL 없는 빈 이미지 ![alt]()            → <img> 단독 (링크 래퍼 없음)
   function _md2html(text) {
     if (!text) return '';
-    // 이미지는 이스케이프 전에 먼저 추출·치환
-    const IMG_PLACEHOLDER = '\x00IMG\x00';
-    const imgs = [];
-    const pre = text.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (_, alt, url) => {
-      imgs.push(`<img src="${url}" alt="${_esc(alt)}" class="crk-md-img">`);
-      return IMG_PLACEHOLDER;
-    });
 
-  // 나머지는 기존대로 이스케이프 후 마크다운 치환
-  let html = _esc(pre)
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*(.+?)\*/g,     '<em>$1</em>')
-    .replace(/\n/g,            '<br>');
+    const IMG_PH = '\x00IMG\x00';
+    const imgs   = [];
 
-  // 플레이스홀더를 실제 img 태그로 복원
-  imgs.forEach(tag => { html = html.replace(_esc(IMG_PLACEHOLDER), tag); });
-  return html;
-}
+    // ── 1순위: 링크 이미지  [![alt](img_url)](link_url)
+    let pre = text.replace(
+      /\[!\[([^\]]*)\]\(([^)]*)\)\]\(([^)]+)\)/g,
+      (_, alt, imgUrl, linkUrl) => {
+        imgUrl  = imgUrl.trim();
+        linkUrl = linkUrl.trim();
+        imgs.push(
+          `<a href="${_esc(linkUrl)}" target="_blank" rel="noopener noreferrer"`
+          + ` style="display:block;text-decoration:none">`
+          + `<img src="${_esc(imgUrl)}" alt="${_esc(alt)}" class="crk-md-img crk-md-img-link">`
+          + `</a>`
+        );
+        return IMG_PH;
+      }
+    );
+
+    // ── 2순위: 일반 이미지  ![alt](url)
+    pre = pre.replace(
+      /!\[([^\]]*)\]\(([^)]*)\)/g,
+      (_, alt, url) => {
+        url = url.trim();
+        if (url) {
+          imgs.push(
+            `<a href="${_esc(url)}" target="_blank" rel="noopener noreferrer"`
+            + ` style="display:block;text-decoration:none">`
+            + `<img src="${_esc(url)}" alt="${_esc(alt)}" class="crk-md-img">`
+            + `</a>`
+          );
+        } else {
+          // URL 없는 이미지: <img> 단독 (alt 텍스트만 표시)
+          imgs.push(`<img alt="${_esc(alt)}" class="crk-md-img">`);
+        }
+        return IMG_PH;
+      }
+    );
+
+    // ── 나머지 마크다운 처리
+    let html = _esc(pre)
+      .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*(.+?)\*/g,     '<em>$1</em>')
+      .replace(/\n/g,            '<br>');
+
+    // ── placeholder 복원
+    imgs.forEach(tag => { html = html.replace(_esc(IMG_PH), tag); });
+    return html;
+  }
 
   function _position(pop, anchor) {
     const ar = anchor.getBoundingClientRect();
@@ -1533,6 +1569,14 @@
   max-width: 100%; border-radius: 6px; margin: 6px 0;
   display: block;
 }
+/* 이미지 링크 래퍼 (클릭 → 새탭) 호버 피드백 */
+#crk-peek a:has(.crk-md-img):hover .crk-md-img {
+  opacity: .80;
+  transition: opacity .12s;
+}
+#crk-peek .crk-md-img-link {
+  cursor: pointer;
+}
 
 /* ── 나만의 태그 (말풍선 + 플랫폼 모달 공용) ── */
 .crk-mytags {
@@ -1622,7 +1666,7 @@
 .crk-mytags-add-btn:hover { background: rgba(245,197,24,.28); }
 
 /* 플랫폼 모달 내 나만의 태그 (별도 배경 패널)
-   v2.2.0: id="web-modal" / css-jmmlw3 소멸 → Radix dialog / semantic class 추가 */
+   v2.1.1: id="web-modal" / css-jmmlw3 소멸 → Radix dialog / semantic class 추가 */
 #web-modal .crk-mytags,
 [class*="css-jmmlw3"] .crk-mytags,
 [role="dialog"] .crk-mytags,
