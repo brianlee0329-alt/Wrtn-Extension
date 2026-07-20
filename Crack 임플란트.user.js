@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crack 임플란트
 // @namespace    https://crack.wrtn.ai
-// @version      2.1.0
-// @description  카드 이미지에 0.8초 호버 → 말풍선 / 메인 페이지 모달 억제 / 나만의 태그 (말풍선·모달·작품페이지) / 좋아요 페이지 나만의 태그 탭
+// @version      2.1.1
+// @description  카드 이미지에 0.8초 호버 → 말풍선 / 메인 페이지 모달 억제 / 나만의 태그 (말풍선·모달·작품페이지) / 좋아요 페이지 나만의 태그 탭 | v2.2.0: 웹모달 id=web-modal 소멸 대응
 // @match        https://crack.wrtn.ai/*
 // @grant        none
 // @run-at       document-start
@@ -294,11 +294,24 @@
   */
   function _handleModalNode(node) {
     // ── 플랫폼 상세 모달 캐싱 ──
-    const modal =
+    // 모달 감지 체인 — 구 선택자(web-modal, css-jmmlw3) + 신 선택자(Radix dialog) 병행
+  // v2.2.0: 플랫폼이 id="web-modal" / Emotion CSS 해시를 제거하고
+  //         role="dialog"[data-state="open"] + character-info-modal-content-body 구조로 전환됨
+  const modal =
+      // ── 레거시 감지 (혹시 복구 시 대비) ──
       (node.id === 'web-modal' ? node : null) ??
       node.querySelector?.('#web-modal') ??
       (node.className?.includes?.('css-jmmlw3') ? node : null) ??
-      node.querySelector?.('[class*="css-jmmlw3"]');
+      node.querySelector?.('[class*="css-jmmlw3"]') ??
+      // ── 신규: Radix UI dialog 직접 감지 ──
+      (node.getAttribute?.('role') === 'dialog' && node.getAttribute?.('data-state') === 'open'
+        ? node : null) ??
+      node.querySelector?.('[role="dialog"][data-state="open"]') ??
+      // ── 신규: 모달 컨텐츠 바디 클래스 감지 (semantic className — 배포 불변) ──
+      (node.classList?.contains?.('character-info-modal-content-body')
+        ? (node.closest?.('[role="dialog"]') ?? node)
+        : null) ??
+      node.querySelector?.('.character-info-modal-content-body');
     if (modal) {
       const tryExtract = () => {
         const link = modal.querySelector('a[href*="/detail/"]');
@@ -1608,9 +1621,12 @@
 }
 .crk-mytags-add-btn:hover { background: rgba(245,197,24,.28); }
 
-/* 플랫폼 모달 내 나만의 태그 (별도 배경 패널) */
+/* 플랫폼 모달 내 나만의 태그 (별도 배경 패널)
+   v2.2.0: id="web-modal" / css-jmmlw3 소멸 → Radix dialog / semantic class 추가 */
 #web-modal .crk-mytags,
 [class*="css-jmmlw3"] .crk-mytags,
+[role="dialog"] .crk-mytags,
+.character-info-modal-content-body .crk-mytags,
 .crk-mytags[data-crk-ctx="detail"] {
   margin: 8px 0 0;
   border: 1px solid rgba(245,197,24,.20);
