@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         좋아요 목록 관리
 // @namespace    https://github.com/workforomg/Util
-// @version      2.0.5
+// @version      2.0.6
 // @description  좋아요 목록 검색/폴더 기능 지원
 // @match        https://crack.wrtn.ai/liked*
 // @grant        GM_addStyle
@@ -188,7 +188,7 @@
         overlay.innerHTML = `
             <div id="lf-modal" onclick="event.stopPropagation()">
                 <h3>
-                    <span>⚙️ 통합 폴더 관리 v2.0.5</span>
+                    <span>⚙️ 통합 폴더 관리 v2.0.6</span>
                     <span style="font-size:11px; font-weight:normal; opacity:0.6;">(클릭 시 즉시 이동)</span>
                 </h3>
 
@@ -404,24 +404,67 @@
 
         document.getElementById('lf-btn-rename-cancel').onclick = () => renameBlock.style.display = 'none';
 
+        // 폴더 블록의 끝 인덱스(exclusive) 반환.
+        // 해당 폴더 + 모든 하위 폴더(재귀)를 하나의 블록으로 처리.
+        // 단순 인접 요소 교환은 하위 폴더가 있는 루트 폴더에서 루트-자식 간
+        // 교환만 일어나 시각 순서가 전혀 바뀌지 않는 문제 해결을 위해 도입.
+        function getBlockEnd(arr, startIdx) {
+            const owned = new Set([arr[startIdx].id]);
+            let i = startIdx + 1;
+            while (i < arr.length) {
+                if (arr[i].parentId && owned.has(arr[i].parentId)) {
+                    owned.add(arr[i].id);
+                    i++;
+                } else break;
+            }
+            return i;
+        }
+
         document.getElementById('lf-btn-up-folder').onclick = () => {
             const idx = folders.findIndex(f => f.id === currentFolderId);
-            if (idx > 0) {
-                [folders[idx], folders[idx-1]] = [folders[idx-1], folders[idx]];
-                saveFolders(folders);
-                renderAll();
-                renderModalUI();
+            if (idx <= 0) return;
+
+            const parentId = folders[idx].parentId;
+            // 같은 부모를 가진 이전 형제 찾기 (단순 idx-1이 아닌 동일 parentId 기준)
+            let prevSibIdx = -1;
+            for (let i = idx - 1; i >= 0; i--) {
+                if (folders[i].parentId === parentId) { prevSibIdx = i; break; }
             }
+            if (prevSibIdx === -1) return;
+
+            // 현재 블록을 먼저 제거(뒤쪽이므로 이전 블록 인덱스에 영향 없음)
+            const currBlock = folders.splice(idx, getBlockEnd(folders, idx) - idx);
+            // 이전 형제 블록 제거 (원래 idx 위치까지 = spliced 후에도 동일)
+            const prevBlock = folders.splice(prevSibIdx, idx - prevSibIdx);
+            // 이전 형제 위치에 현재 블록 → 이전 블록 순으로 삽입
+            folders.splice(prevSibIdx, 0, ...currBlock, ...prevBlock);
+
+            saveFolders(folders);
+            renderAll();
+            renderModalUI();
         };
 
         document.getElementById('lf-btn-down-folder').onclick = () => {
             const idx = folders.findIndex(f => f.id === currentFolderId);
-            if (idx !== -1 && idx < folders.length - 1) {
-                [folders[idx], folders[idx+1]] = [folders[idx+1], folders[idx]];
-                saveFolders(folders);
-                renderAll();
-                renderModalUI();
+            if (idx < 0) return;
+
+            const parentId = folders[idx].parentId;
+            const currEnd = getBlockEnd(folders, idx);
+
+            // 현재 블록 이후에서 같은 부모를 가진 다음 형제 찾기
+            let nextSibIdx = -1;
+            for (let i = currEnd; i < folders.length; i++) {
+                if (folders[i].parentId === parentId) { nextSibIdx = i; break; }
             }
+            if (nextSibIdx === -1) return;
+
+            // 다음 형제 블록을 제거한 뒤 현재 블록 앞에 삽입
+            const nextBlock = folders.splice(nextSibIdx, getBlockEnd(folders, nextSibIdx) - nextSibIdx);
+            folders.splice(idx, 0, ...nextBlock);
+
+            saveFolders(folders);
+            renderAll();
+            renderModalUI();
         };
 
         document.getElementById('lf-btn-new-folder').onclick = () => {
