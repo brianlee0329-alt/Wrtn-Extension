@@ -42,42 +42,59 @@
     function saveFolders(folders) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(folders));
     }
-    // 동명 작품 중복 키 버그 수정: 제목 텍스트 대신 thumbnail CloudFront ID 사용.
-    // 형식: crk:{ID}  (예: crk:8MFXSo)
-    // 'crk:' 접두사로 기존 저장된 제목 문자열(구형식)과 명확히 구분하여 마이그레이션 판별.
+    // URL 구조: .../cloudfront.net/{user_id}/{uuid}_w600.webp
+    // user_id는 작성자 단위로 공유됨 → 두 번째 세그먼트의 UUID가 캐릭터별 고유 식별자.
+    // 형식: crk:{uuid}  (예: crk:21058e4a-b85d-4427-9292-5b970823e950)
     function getCardKey(card) {
         const src = card.querySelector('img')?.src || '';
-        const m = src.match(/cloudfront\.net\/([^/?#\s]+)/);
+        const m = src.match(/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
         return m ? 'crk:' + m[1] : (card.querySelector(TITLE_SEL)?.textContent?.trim() || '');
     }
-    function isNewKey(k) { return k.startsWith('crk:'); }
+    // UUID 형식의 crk 키만 신형식으로 인정
+    // (v1.7.0의 구 crk:user_id 형식은 isNewKey=false → 재마이그레이션 대상)
+    function isNewKey(k) {
+        return /^crk:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(k);
+    }
 
-    // 구형식(제목) → 신형식(crk:ID) 일회성 마이그레이션.
-    // renderAll() 첫 호출 시 DOM에서 title→key 매핑을 만들어 저장 데이터를 인플레이스 변환.
-    // 동명 작품이 여럿일 경우 DOM 순서대로 하나씩 할당 (순서 보장 불가, 최선 처리).
+    // 구형식 키 → 신형식(crk:uuid) 일회성 마이그레이션.
+    // 처리 대상:
+    //   1) 제목 문자열 키 (v1.7.0 이전)
+    //   2) crk:user_id 형식 키 (v1.7.0 - cloudfront 첫 경로 세그먼트를 잘못 추출)
+    // 동명/동일 user_id 작품이 여럿일 경우 DOM 순서대로 순차 할당 (최선 처리).
     function migrateKeysIfNeeded(folders) {
         if (!folders.some(f => f.items.some(k => !isNewKey(k)))) return;
         const grid = document.querySelector(GRID_SEL);
         if (!grid) return;
 
-        // 제목 → 아직 매핑 안 된 크랙 ID 목록
-        const titlePool = new Map();
+        // 구형식 키 → [신형식 uuid 키] 역방향 맵
+        const keyRemap = new Map();
         grid.querySelectorAll(CARD_SEL).forEach(card => {
             if (card.closest('.lf-folder-card')) return;
+            const newKey = getCardKey(card);
+            if (!isNewKey(newKey)) return;
+
+            // 경로 1: 제목 문자열 키
             const title = card.querySelector(TITLE_SEL)?.textContent?.trim();
-            const key = getCardKey(card);
-            if (title && isNewKey(key)) {
-                if (!titlePool.has(title)) titlePool.set(title, []);
-                titlePool.get(title).push(key);
+            if (title) {
+                if (!keyRemap.has(title)) keyRemap.set(title, []);
+                keyRemap.get(title).push(newKey);
+            }
+
+            // 경로 2: 구 crk:user_id 형식 키 (v1.7.0)
+            const src = card.querySelector('img')?.src || '';
+            const um = src.match(/cloudfront\.net\/([^/?#\s]+)\//);
+            if (um) {
+                const oldCrk = 'crk:' + um[1];
+                if (!keyRemap.has(oldCrk)) keyRemap.set(oldCrk, []);
+                keyRemap.get(oldCrk).push(newKey);
             }
         });
 
         folders.forEach(folder => {
             folder.items = folder.items.map(item => {
                 if (isNewKey(item)) return item;
-                const pool = titlePool.get(item);
-                if (pool && pool.length > 0) return pool.shift();
-                return item; // 매핑 실패 시 원본 유지
+                const pool = keyRemap.get(item);
+                return (pool && pool.length > 0) ? pool.shift() : item;
             });
         });
         saveFolders(folders);
