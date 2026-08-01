@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         좋아요 목록 관리
 // @namespace    https://github.com/workforomg/Util
-// @version      2.0.6
+// @version      2.0.7
 // @description  좋아요 목록 검색/폴더 기능 지원
 // @match        https://crack.wrtn.ai/liked*
 // @grant        GM_addStyle
@@ -42,8 +42,45 @@
     function saveFolders(folders) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(folders));
     }
+    // 동명 작품 중복 키 버그 수정: 제목 텍스트 대신 thumbnail CloudFront ID 사용.
+    // 형식: crk:{ID}  (예: crk:8MFXSo)
+    // 'crk:' 접두사로 기존 저장된 제목 문자열(구형식)과 명확히 구분하여 마이그레이션 판별.
     function getCardKey(card) {
-        return card.querySelector(TITLE_SEL)?.textContent?.trim() || '';
+        const src = card.querySelector('img')?.src || '';
+        const m = src.match(/cloudfront\.net\/([^/?#\s]+)/);
+        return m ? 'crk:' + m[1] : (card.querySelector(TITLE_SEL)?.textContent?.trim() || '');
+    }
+    function isNewKey(k) { return k.startsWith('crk:'); }
+
+    // 구형식(제목) → 신형식(crk:ID) 일회성 마이그레이션.
+    // renderAll() 첫 호출 시 DOM에서 title→key 매핑을 만들어 저장 데이터를 인플레이스 변환.
+    // 동명 작품이 여럿일 경우 DOM 순서대로 하나씩 할당 (순서 보장 불가, 최선 처리).
+    function migrateKeysIfNeeded(folders) {
+        if (!folders.some(f => f.items.some(k => !isNewKey(k)))) return;
+        const grid = document.querySelector(GRID_SEL);
+        if (!grid) return;
+
+        // 제목 → 아직 매핑 안 된 크랙 ID 목록
+        const titlePool = new Map();
+        grid.querySelectorAll(CARD_SEL).forEach(card => {
+            if (card.closest('.lf-folder-card')) return;
+            const title = card.querySelector(TITLE_SEL)?.textContent?.trim();
+            const key = getCardKey(card);
+            if (title && isNewKey(key)) {
+                if (!titlePool.has(title)) titlePool.set(title, []);
+                titlePool.get(title).push(key);
+            }
+        });
+
+        folders.forEach(folder => {
+            folder.items = folder.items.map(item => {
+                if (isNewKey(item)) return item;
+                const pool = titlePool.get(item);
+                if (pool && pool.length > 0) return pool.shift();
+                return item; // 매핑 실패 시 원본 유지
+            });
+        });
+        saveFolders(folders);
     }
 
     // ─────────────────────────────────────────────
@@ -182,13 +219,16 @@
         const grid = document.querySelector(GRID_SEL);
         const allCards = Array.from(grid?.querySelectorAll(CARD_SEL) || []).filter(c => !c.closest('.lf-folder-card'));
         const allKeys = allCards.map(c => getCardKey(c)).filter(k => k);
+        // crk:ID → 제목 역방향 맵: 모달 표시용
+        const keyToTitle = new Map(allCards.map(c => [getCardKey(c), c.querySelector(TITLE_SEL)?.textContent?.trim() || '']).filter(([k]) => k));
+        const getLabel = k => keyToTitle.get(k) || k;
 
         const overlay = document.createElement('div');
         overlay.id = 'lf-modal-overlay';
         overlay.innerHTML = `
             <div id="lf-modal" onclick="event.stopPropagation()">
                 <h3>
-                    <span>⚙️ 통합 폴더 관리 v2.0.6</span>
+                    <span>⚙️ 통합 폴더 관리 v2.0.7</span>
                     <span style="font-size:11px; font-weight:normal; opacity:0.6;">(클릭 시 즉시 이동)</span>
                 </h3>
 
@@ -284,7 +324,7 @@
             allKeys.filter(k => !assignedKeys.has(k)).forEach(k => {
                 const div = document.createElement('div');
                 div.className = 'lf-list-item';
-                div.innerHTML = `<span class="lf-work-name">${k}</span>`;
+                div.innerHTML = `<span class="lf-work-name" title="${getLabel(k)}">${getLabel(k)}</span>`;
                 div.querySelector('.lf-work-name').onclick = () => {
                     if (!currentFolderId) return;
                     const folder = folders.find(f => f.id === currentFolderId);
@@ -304,7 +344,7 @@
                         const div = document.createElement('div');
                         div.className = 'lf-list-item';
                         div.innerHTML = `
-                            <span class="lf-work-name">${k}</span>
+                            <span class="lf-work-name" title="${getLabel(k)}">${getLabel(k)}</span>
                             <div class="lf-item-nav">
                                 <button class="lf-item-up">▲</button>
                                 <button class="lf-item-down">▼</button>
@@ -512,6 +552,7 @@
         if (!grid) return;
 
         const folders = getFolders();
+        migrateKeysIfNeeded(folders); // 구형식 키(제목) → 신형식(crk:ID) 일회성 변환
         const assignedKeys = new Set(folders.flatMap(f => f.items));
 
         grid.querySelectorAll('.lf-folder-card').forEach(el => el.remove());
@@ -538,7 +579,7 @@
                 <div class="lf-folder-summary">
                     <span class="icon">📁</span>
                     <span class="title">${folderData.name}</span>
-                    <span class="count">${folderCards.length}개 작품<br>${subFolders.length}개 폴더</span>
+                    <span class="count">${folderCards.length}개 작품 / ${subFolders.length}개 폴더</span>
                 </div>
                 <div class="lf-folder-detail">
                     <div class="lf-folder-grid"></div>
