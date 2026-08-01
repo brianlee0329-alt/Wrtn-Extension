@@ -579,7 +579,7 @@
                 <div class="lf-folder-summary">
                     <span class="icon">📁</span>
                     <span class="title">${folderData.name}</span>
-                    <span class="count">${folderCards.length}개 작품 / ${subFolders.length}개 폴더</span>
+                    <span class="count">${folderCards.length}개 작품<br>${subFolders.length}개 폴더</span>
                 </div>
                 <div class="lf-folder-detail">
                     <div class="lf-folder-grid"></div>
