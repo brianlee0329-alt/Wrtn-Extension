@@ -92,7 +92,7 @@ GM_addStyle(`
 
 !(async function () {
   const PLATFORM_SAVE_KEY = "chasm-ignt-settings";
-  const VERSION = "v1.7.0";
+  const VERSION = "v1.6.6";
 
   const { initializeApp } = await import(
     // @ts-ignore
@@ -1670,7 +1670,7 @@ GM_addStyle(`
   }, 1);
 
   /* =====================================================
-     타이머 틱 — GC 최적화 (CRAK-IGNT-v1.7.0)
+     타이머 틱 — GC 최적화 (CRAK-IGNT-v1.6.6)
      =====================================================
      기존 구조의 문제:
        setInterval 1000ms마다 아래 비용이 무조건 발생했음:
@@ -1687,7 +1687,7 @@ GM_addStyle(`
      AI 응답 대기 중(= 대부분의 시간)에는 실질 작업이 없는데도
      1초마다 이 사이클이 반복되어 Young Gen 오염의 주요 원인이었음.
 
-     v1.7.0 변경 사항:
+     v1.6.6 변경 사항:
        - 타이머 상태를 DOM 속성이 아닌 JS 변수(_timerFlow)로 관리.
          DOM 읽기/쓰기 횟수가 tick당 최대 1회(textContent)로 감소.
        - 비활성 시(_timerFlow === -1): setInterval 콜백이 즉시 return.
@@ -1995,7 +1995,7 @@ GM_addStyle(`
   // =================================================
   //                  메뉴 강제 추가
   // =================================================
-  /* __updateModalMenu — GC 최적화 (v1.7.0)
+  /* __updateModalMenu — GC 최적화 (v1.6.6)
      문제: chasm-decentral-menu 삽입 성공 이후에도 MutationObserver
      콜백마다 getElementById × 2 + getElementsByTagName('a') 전수 순회가
      반복됐음. React 스트리밍 중 DOM 변경이 잦은 구간에서 특히 비용이 큼.
@@ -2094,7 +2094,7 @@ GM_addStyle(`
 
     /**
      * 최신 AI 메시지를 수정하여 하단에 요약본을 덧붙입니다.
-     * (일반챗 없이 동작하는 방식으로 변경 — v1.7.0)
+     * (일반챗 없이 동작하는 방식으로 변경 — v1.6.6)
      *
      * 동작 순서:
      *   1. GET  /v3/chats/{id}/messages?limit=1  → 최신 assistant 메시지 확보
