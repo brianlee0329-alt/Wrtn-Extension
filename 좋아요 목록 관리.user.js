@@ -44,23 +44,31 @@
     }
     // URL 구조: .../cloudfront.net/{user_id}/{uuid}_w600.webp
     // user_id는 작성자 단위로 공유됨 → 두 번째 세그먼트의 UUID가 캐릭터별 고유 식별자.
-    // 형식: crk:{uuid}  (예: crk:21058e4a-b85d-4427-9292-5b970823e950)
+    // v2.0.7: 동일 제작자의 성인/미성년자 버전이 커버 이미지(UUID)를 공유하는 사례 확인.
+    //   (예: '토벌 엔딩이 정해진 마왕에 빙의했다' vs '…N' → 둘 다 8b2e9464-… 동일 UUID)
+    //   UUID만으로는 두 카드를 구별할 수 없으므로 제목을 복합키의 두 번째 요소로 추가.
+    //   형식: crk:{uuid}:{title}
+    //   제목이 아직 로드되지 않은 경우(Virtuoso 비마운트 상태 등) 빈 문자열 반환 → 처리 건너뜀.
     function getCardKey(card) {
         const src = card.querySelector('img')?.src || '';
         const m = src.match(/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
-        return m ? 'crk:' + m[1] : (card.querySelector(TITLE_SEL)?.textContent?.trim() || '');
+        const title = card.querySelector(TITLE_SEL)?.textContent?.trim() || '';
+        if (m) return title ? 'crk:' + m[1] + ':' + title : '';
+        return title;
     }
-    // UUID 형식의 crk 키만 신형식으로 인정
-    // (v1.7.0의 구 crk:user_id 형식은 isNewKey=false → 재마이그레이션 대상)
+    // crk:{uuid}:{title} 복합키 형식만 신형식으로 인정.
+    // v2.0.x의 crk:{uuid} 형식($ 앵커로 끝남, 제목 없음)은 isNewKey=false → 마이그레이션 경로 3 대상.
+    // crk:{uuid}: (빈 제목) 도 false → 저장되지 않도록 방지.
     function isNewKey(k) {
-        return /^crk:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(k);
+        return /^crk:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:.+$/i.test(k);
     }
 
-    // 구형식 키 → 신형식(crk:uuid) 일회성 마이그레이션.
+    // 구형식 키 → 신형식(crk:uuid:title) 일회성 마이그레이션.
     // 처리 대상:
     //   1) 제목 문자열 키 (v1.7.0 이전)
     //   2) crk:user_id 형식 키 (v1.7.0 - cloudfront 첫 경로 세그먼트를 잘못 추출)
-    // 동명/동일 user_id 작품이 여럿일 경우 DOM 순서대로 순차 할당 (최선 처리).
+    //   3) crk:uuid 형식 키 (v2.0.x - 동일 UUID 공유 충돌 대응으로 v2.0.7에서 복합키로 전환)
+    // 동명/동일 uuid 작품이 여럿일 경우 DOM 순서대로 순차 할당 (최선 처리).
     function migrateKeysIfNeeded(folders) {
         if (!folders.some(f => f.items.some(k => !isNewKey(k)))) return;
         const grid = document.querySelector(GRID_SEL);
@@ -87,6 +95,15 @@
                 const oldCrk = 'crk:' + um[1];
                 if (!keyRemap.has(oldCrk)) keyRemap.set(oldCrk, []);
                 keyRemap.get(oldCrk).push(newKey);
+            }
+
+            // 경로 3: 구 crk:uuid 형식 키 (v2.0.x → v2.0.7)
+            // UUID를 공유하는 복수 작품이 있으면 pool에 복수 항목 → pool.shift()로 DOM 순서 기준 순차 할당.
+            const uuidOnly = src.match(/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
+            if (uuidOnly) {
+                const oldUuidKey = 'crk:' + uuidOnly[1];
+                if (!keyRemap.has(oldUuidKey)) keyRemap.set(oldUuidKey, []);
+                keyRemap.get(oldUuidKey).push(newKey);
             }
         });
 
@@ -238,7 +255,9 @@
         const allKeys = allCards.map(c => getCardKey(c)).filter(k => k);
         // crk:ID → 제목 역방향 맵: 모달 표시용
         const keyToTitle = new Map(allCards.map(c => [getCardKey(c), c.querySelector(TITLE_SEL)?.textContent?.trim() || '']).filter(([k]) => k));
-        const getLabel = k => keyToTitle.get(k) || k;
+        // keyToTitle에 없으면(카드가 찜 취소돼 DOM 부재 등) 복합키에서 제목 파싱.
+        // crk:{uuid}:{title} → title, 그 외 → 키 문자열 그대로.
+        const getLabel = k => keyToTitle.get(k) || (isNewKey(k) ? k.replace(/^crk:[^:]+:/, '') : k);
 
         const overlay = document.createElement('div');
         overlay.id = 'lf-modal-overlay';
