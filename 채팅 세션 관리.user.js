@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         채팅 세션 관리
 // @namespace    https://github.com/workforomg/Utill
-// @version      3.1.3
+// @version      3.1.8
 // @description  보관함/채팅 목록 탭 분리 + 검색/메모/이어하기/이름 애니메이션 + 보관함 카테고리 통합
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_addStyle
@@ -88,6 +88,38 @@
             // _memCache는 이미 c와 동일 참조이므로 별도 갱신 불필요
         }
     }
+
+    // ── 죽은 세션 정리 ───────────────────────────────────────────────
+    // [v3.1.8] pruneDeadSessions(클라이언트 API 검증) 제거.
+    // /v3/chats/{chatId} GET은 공개 API에 존재하지 않는 라우트로,
+    // 살아있는 세션도 항상 404를 반환해 캐시를 전부 파괴하는 문제가 있었음.
+    // SSR 데이터(__NEXT_DATA__) 기반의 pruneNextDataDeadSession만 유지한다.
+    // 삭제된 세션이 픽커에 노출될 경우, 해당 세션 URL 방문 시 Next.js SSR이
+    // 404를 fallback에 포함시키므로 다음 로드에서 자동 정리된다.
+
+    // (1) 즉시 경로: __NEXT_DATA__ SSR fallback에서 404 세션을 캐시에서 제거.
+    function pruneNextDataDeadSession() {
+        try {
+            const fallback = window.__NEXT_DATA__?.props?.pageProps?.fallback;
+            if (!fallback) return;
+            const c = getCache();
+            let changed = false;
+            Object.entries(fallback).forEach(([key, val]) => {
+                // key 예: /v3/chats/6a3dbc8ad6096aee85139924
+                const m = key.match(/^\/v3\/chats\/([a-f0-9]{24})$/);
+                if (!m || val?.statusCode !== 404) return;
+                const chatId = m[1];
+                Object.keys(c).forEach(href => {
+                    if (href.endsWith(`/episodes/${chatId}`)) {
+                        delete c[href];
+                        changed = true;
+                    }
+                });
+            });
+            if (changed) { _memCache = c; localStorage.setItem(CACHE_KEY, JSON.stringify(c)); }
+        } catch {}
+    }
+
 
     // ── 메모 ────────────────────────────────────────────────────────
     function getMemo(href)  { if (!_memMemo) _memMemo = _loadMemo(); return _memMemo[href] || ''; }
@@ -1191,6 +1223,19 @@
        10. 메모 UI (모든 뷰 공통)
     ================================================================ */
     function injectMemoUI() {
+        // ── 패스 1: 캐시 갱신 (data-crack-memo 무관, 매 tick 실행) ──────────
+        // [v3.1.6] 기존 :not([data-crack-memo]) 필터 때문에 archive-inner에서
+        // 이미 처리된 링크들이 스킵되어 보관함을 열고 닫아도 캐시가 갱신되지 않던
+        // 문제를 수정. SEL_LINK 전체를 대상으로 유효한 제목을 매 tick 캐시에 동기화.
+        // cacheSession 내부에서 동일 제목이면 localStorage 쓰기를 스킵하므로 비용 최소.
+        document.querySelectorAll(SEL_LINK).forEach(link => {
+            const href = link.getAttribute('href');
+            if (!href) return;
+            const t = extractTitle(link);
+            if (t && t !== '이름 없는 세션') cacheSession(href, t);
+        });
+
+        // ── 패스 2: UI 주입 + data-crack-memo 관리 (미처리 링크만) ──────────
         let hadNew = false;
         document.querySelectorAll(`${SEL_LINK}:not([data-crack-memo])`).forEach(link => {
             const href = link.getAttribute('href');
@@ -1541,6 +1586,8 @@
         _debounce = setTimeout(() => { _lastView = null; tick(); }, 250);
     }).observe(document.body, { childList: true, subtree: true });
 
+    // [v3.1.4] __NEXT_DATA__에서 404 세션을 즉시 캐시에서 제거 (추가 네트워크 비용 없음)
+    pruneNextDataDeadSession();
     tick();
 
     /* ================================================================
