@@ -480,8 +480,12 @@ function _makeThrottle(fn, wait) {
     const lastKey = await getLastSelected();
     if (lastKey) {
       const note = await getNote(lastKey);
-      if (note) { currentKey = lastKey; await handle2000Toggle(modal, textarea, note.noteContent); performTextAreaModification(textarea, note.noteContent); }
-      else { await setLastSelected(null); }
+      if (note) {
+        // 목록 하이라이트용으로 키만 기억. textarea 자동 로드는 하지 않는다.
+        currentKey = lastKey;
+      } else {
+        await setLastSelected(null);
+      }
     }
     await renderList(sidebar, modal, textarea);
   }
@@ -942,13 +946,21 @@ function _makeThrottle(fn, wait) {
     // 다이얼로그 바깥 클릭을 판별한다. window capture는 document capture보다 먼저 실행되므로
     // 오버레이 내부 이벤트에 한해 stopImmediatePropagation → 대화 프로필 모달이 닫히지 않는다.
     // (관리 버튼 클릭 시 focusin이 발생하는 경우도 함께 차단)
+    // mousedown: Radix FocusTrap이 mousedown을 document capture에서 처리해
+    //   포커스를 Dialog 안으로 돌려보내는 것을 막음 (라벨 input 3단계 클릭 문제 해결)
+    // wheel: react-remove-scroll이 wheel을 document capture에서 잠금
+    //   (관리 모달 스크롤 불가 문제 해결)
     const _stopOutside = e => { if (overlay.contains(e.target)) e.stopImmediatePropagation(); };
     window.addEventListener('pointerdown', _stopOutside, true);
+    window.addEventListener('mousedown',   _stopOutside, true);
     window.addEventListener('focusin',     _stopOutside, true);
+    window.addEventListener('wheel',       _stopOutside, { capture: true, passive: true });
 
     const _closeOverlay = () => {
       window.removeEventListener('pointerdown', _stopOutside, true);
+      window.removeEventListener('mousedown',   _stopOutside, true);
       window.removeEventListener('focusin',     _stopOutside, true);
+      window.removeEventListener('wheel',       _stopOutside, { capture: true });
       overlay.remove();
     };
 
