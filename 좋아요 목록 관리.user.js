@@ -1,9 +1,10 @@
 // ==UserScript==
 // @name         좋아요 목록 관리
 // @namespace    https://github.com/workforomg/Util
-// @version      2.0.7
-// @description  좋아요 목록 검색/폴더 기능 지원
+// @version      3.0.0
+// @description  컬렉션 전체 표시 / 좋아요 목록 접기 / 작품 검색 / 컬렉션 태그
 // @match        https://crack.wrtn.ai/liked*
+// @match        https://crack.wrtn.ai/collections/*
 // @grant        GM_addStyle
 // @run-at       document-end
 // ==/UserScript==
@@ -11,806 +12,1136 @@
 (function () {
     'use strict';
 
-    // ─────────────────────────────────────────────
-    // 0. 상수 및 설정
-    // ─────────────────────────────────────────────
-    const STORAGE_KEY = 'liked_folders_v1';
+    // ─────────────────────────────────────────────────────────────────
+    // §0. 마이그레이션 / 상수 / 선택자
+    // ─────────────────────────────────────────────────────────────────
 
-    // v1.1.0: Emotion 해시 클래스 → Tailwind 클래스 기반 전환
-    // v1.2.0: #liked-scroll 사라짐 → class 기반 매칭
-    // v1.3.0: #liked-scroll 재출현. 단 'div.grid[class*="grid-cols-3"]'가
-    //   모바일 네비게이션 헤더 격자(top-[64px], gap-5, items-center)를 DOM 순서상
-    //   먼저 매칭하는 문제 발생 -> gap-y-10 구별자 + #liked-scroll 스코프로 작품 격자만 매칭.
-    //   PAGE_TITLE_SEL 신설: .css-342uqh를 공유하는 배너('앱에서 더 편하게')가 DOM 순서상
-    //   앞이라 querySelector('.css-342uqh')가 배너를 반환 -> typo-text-2xl로 제목만 매칭.
-    const PAGE_TITLE_SEL = '#liked-scroll p[class*="typo-text-2xl"]'; // 페이지 제목
-    const GRID_SEL   = '#liked-scroll div.grid[class*="gap-y-10"]'; // 작품 그리드
-    const CARD_SEL   = ':scope > div[role="button"]';                // 개별 카드 (직접 자식만)
-    const TITLE_SEL  = 'p.line-clamp-2';                             // 작품 제목 텍스트
+    // v2.0.x 구형식 폴더 데이터 자동 삭제 (일회성)
+    localStorage.removeItem('liked_folders_v1');
 
-    const PATH_UNSAFE = "m20.7 4.47-8.3-2.68c-.26-.08-.54-.08-.8 0L3.3 4.47c-.54.18-.9.68-.9 1.24v4.12c0 5.74 3.69 10.81 9.18 12.61.13.05.28.07.42.07s.28-.02.42-.07c5.49-1.8 9.18-6.87 9.18-12.61V5.71c0-.56-.36-1.06-.9-1.24M12 6.28c1.83 0 3.31 1.48 3.31 3.31S13.83 12.9 12 12.9s-3.31-1.49-3.31-3.31S10.17 6.28 12 6.28m4.35 12a9 9 0 0 1-.58.51c-.03.03-.07.06-.11.08-.06.06-.13.12-.2.16-.06.06-.13.11-.2.15 0 .01-.01.01-.02.02l-.1.07c-.94.69-2 1.23-3.14 1.62-1.66-.55-3.12-1.45-4.34-2.61a9.3 9.3 0 0 1-1.09-1.17c1.42-1.34 3.67-1.83 5.41-1.83s4.02.49 5.44 1.83c-.32.41-.68.81-1.07 1.17";
+    const PAGE_TITLE_SEL = '#liked-scroll p[class*="typo-text-2xl"]';
+    const GRID_SEL       = '#liked-scroll div.grid[class*="gap-y-10"]';
+    const CARD_SEL       = ':scope > div[role="button"]';
+    const TITLE_SEL      = 'p.line-clamp-2';
+    const CAROUSEL_SEL   = '#liked-scroll [aria-roledescription="carousel"]';
+    const SLIDE_SEL      = '[aria-roledescription="slide"]';
 
-    // ─────────────────────────────────────────────
-    // 1. 데이터 관리
-    // ─────────────────────────────────────────────
-    function getFolders() {
-        try {
-            const data = JSON.parse(localStorage.getItem(STORAGE_KEY)) || [];
-            return data.map(f => ({ ...f, parentId: f.parentId || null }));
-        } catch { return []; }
-    }
-    function saveFolders(folders) {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(folders));
-    }
-    // URL 구조: .../cloudfront.net/{user_id}/{uuid}_w600.webp
-    // user_id는 작성자 단위로 공유됨 → 두 번째 세그먼트의 UUID가 캐릭터별 고유 식별자.
-    // v2.0.7: 동일 제작자의 성인/미성년자 버전이 커버 이미지(UUID)를 공유하는 사례 확인.
-    //   (예: '토벌 엔딩이 정해진 마왕에 빙의했다' vs '…N' → 둘 다 8b2e9464-… 동일 UUID)
-    //   UUID만으로는 두 카드를 구별할 수 없으므로 제목을 복합키의 두 번째 요소로 추가.
-    //   형식: crk:{uuid}:{title}
-    //   제목이 아직 로드되지 않은 경우(Virtuoso 비마운트 상태 등) 빈 문자열 반환 → 처리 건너뜀.
-    function getCardKey(card) {
-        const src = card.querySelector('img')?.src || '';
-        const m = src.match(/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
-        const title = card.querySelector(TITLE_SEL)?.textContent?.trim() || '';
-        if (m) return title ? 'crk:' + m[1] + ':' + title : '';
-        return title;
-    }
-    // crk:{uuid}:{title} 복합키 형식만 신형식으로 인정.
-    // v2.0.x의 crk:{uuid} 형식($ 앵커로 끝남, 제목 없음)은 isNewKey=false → 마이그레이션 경로 3 대상.
-    // crk:{uuid}: (빈 제목) 도 false → 저장되지 않도록 방지.
-    function isNewKey(k) {
-        return /^crk:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}:.+$/i.test(k);
-    }
+    const LAYOUT_KEY       = 'crk-liked-col-layout';     // 컬렉션 행 순서 + 색상
+    const COLLAPSE_KEY     = 'crk-liked-grid-collapsed'; // 작품 그리드 접기 상태
+    const COL_COLLAPSE_KEY = 'crk-liked-col-collapsed';  // 컬렉션 섹션 접기 상태
+    const COL_CACHE_PREFIX = 'crk-col-cache::';           // 컬렉션 카드 캐시
 
-    // 구형식 키 → 신형식(crk:uuid:title) 일회성 마이그레이션.
-    // 처리 대상:
-    //   1) 제목 문자열 키 (v1.7.0 이전)
-    //   2) crk:user_id 형식 키 (v1.7.0 - cloudfront 첫 경로 세그먼트를 잘못 추출)
-    //   3) crk:uuid 형식 키 (v2.0.x - 동일 UUID 공유 충돌 대응으로 v2.0.7에서 복합키로 전환)
-    // 동명/동일 uuid 작품이 여럿일 경우 DOM 순서대로 순차 할당 (최선 처리).
-    function migrateKeysIfNeeded(folders) {
-        if (!folders.some(f => f.items.some(k => !isNewKey(k)))) return;
-        const grid = document.querySelector(GRID_SEL);
-        if (!grid) return;
-
-        // 구형식 키 → [신형식 uuid 키] 역방향 맵
-        const keyRemap = new Map();
-        grid.querySelectorAll(CARD_SEL).forEach(card => {
-            if (card.closest('.lf-folder-card')) return;
-            const newKey = getCardKey(card);
-            if (!isNewKey(newKey)) return;
-
-            // 경로 1: 제목 문자열 키
-            const title = card.querySelector(TITLE_SEL)?.textContent?.trim();
-            if (title) {
-                if (!keyRemap.has(title)) keyRemap.set(title, []);
-                keyRemap.get(title).push(newKey);
-            }
-
-            // 경로 2: 구 crk:user_id 형식 키 (v1.7.0)
-            const src = card.querySelector('img')?.src || '';
-            const um = src.match(/cloudfront\.net\/([^/?#\s]+)\//);
-            if (um) {
-                const oldCrk = 'crk:' + um[1];
-                if (!keyRemap.has(oldCrk)) keyRemap.set(oldCrk, []);
-                keyRemap.get(oldCrk).push(newKey);
-            }
-
-            // 경로 3: 구 crk:uuid 형식 키 (v2.0.x → v2.0.7)
-            // UUID를 공유하는 복수 작품이 있으면 pool에 복수 항목 → pool.shift()로 DOM 순서 기준 순차 할당.
-            const uuidOnly = src.match(/\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i);
-            if (uuidOnly) {
-                const oldUuidKey = 'crk:' + uuidOnly[1];
-                if (!keyRemap.has(oldUuidKey)) keyRemap.set(oldUuidKey, []);
-                keyRemap.get(oldUuidKey).push(newKey);
-            }
-        });
-
-        folders.forEach(folder => {
-            folder.items = folder.items.map(item => {
-                if (isNewKey(item)) return item;
-                const pool = keyRemap.get(item);
-                return (pool && pool.length > 0) ? pool.shift() : item;
-            });
-        });
-        saveFolders(folders);
-    }
-
-    // ─────────────────────────────────────────────
-    // 2. CSS 스타일
-    // ─────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────
+    // §1. CSS
+    // ─────────────────────────────────────────────────────────────────
     GM_addStyle(`
-        #lf-sticky-header {
-            position: sticky; top: 56px; z-index: 10;
-            background-color: var(--bg_screen, #ffffff);
-            padding: 16px 0 0 0; margin-top: -16px;
+        /* ── 검색 버튼 + 검색바 ── */
+        #lf-search-btn {
+            font-size: 14px; padding: 1px 8px; border-radius: 6px;
+            border: none; background: rgba(125,125,125,.12);
+            color: inherit; cursor: pointer; flex-shrink: 0;
         }
-        /* v1.3.1: ::before 제거했었으나, 원본 <p>가 display:none 처리됐으므로 복원해도 무관.
-           복원하지 않으면 sticky 고정 시 상단 여백 너머로 컨텐츠가 비쳐보임. */
-        #lf-sticky-header::before {
-            content: ""; position: absolute; bottom: 100%; left: 0; right: 0;
-            height: 200px; background-color: var(--bg_screen, #ffffff); pointer-events: none;
+        #lf-search-btn:hover { background: rgba(125,125,125,.22); }
+        /* 탭 아래 고정 검색창 */
+        #lf-search-bar {
+            position: sticky;
+            z-index: 9;
+            background: var(--bg_screen, #fff);
+            padding: 6px 0 8px;
+            box-shadow: 0 -50px 0 50px var(--bg_screen, #fff);
         }
-        /* v1.3.2: 탭바 컨테이너(sticky-header 직후 형제)가 DOM 순서상 나중에 오므로
-           기본 stacking order에 의해 z-index:10인 sticky-header를 덮어버림.
-           형제에 position:relative + z-index:1을 주어 명시적 stacking context를 생성,
-           sticky-header(z-index:10)가 항상 위에 오도록 역전. */
-        #lf-sticky-header + * { position: relative; z-index: 1; }
-        .lf-header-container { display: flex; justify-content: space-between; align-items: center; width: 100%; padding-top: 6px; }
-        .lf-header-title-text { font-size: 20px; font-weight: 700; color: var(--text_primary, #000); line-height: 1; }
-        .lf-manage-btn {
-            padding: 6px 14px; background: rgba(125,125,125,.15); border: none; border-radius: 8px;
-            font-size: 13px; font-weight: bold; cursor: pointer; color: inherit;
-        }
-        .lf-search-wrap { padding: 10px 0 16px 0; width: 100%; position: relative; z-index: 11; }
         .lf-search-input {
-            width: 100%; padding: 12px 15px; border-radius: 10px;
-            border: 1px solid var(--outline_tertiary, #e0e0e0); background: var(--bg_secondary, transparent);
-            color: var(--text_primary, #000); font-size: 14px; outline: none;
+            display: block; width: 100%; padding: 10px 15px; border-radius: 10px;
+            border: 1px solid var(--outline_tertiary, #e0e0e0);
+            background: var(--bg_secondary, transparent);
+            color: var(--text_primary, #000); font-size: 14px;
+            outline: none; box-sizing: border-box;
         }
 
-        #lf-scroll-spacer {
-            grid-column: 1 / -1;
-            pointer-events: none;
-            flex-shrink: 0;
+        /* ── 컬렉션 섹션 ── */
+        #lf-col-section { margin-bottom: 16px; }
+        .lf-col-hdr {
+            display: flex; align-items: center; justify-content: space-between;
+            height: 24px; margin-bottom: 12px;
         }
+        .lf-col-hdr-title {
+            font-size: 15px; font-weight: 600;
+            color: var(--foreground, #000);
+            flex: 1; /* justify-between 3분할 방지 → 버튼들을 오른쪽으로 */
+        }
+        .lf-col-edit-btn {
+            font-size: 12px; padding: 3px 10px; border-radius: 6px;
+            border: none; background: rgba(125,125,125,.12);
+            color: inherit; cursor: pointer; font-weight: 500;
+        }
+        .lf-col-edit-btn:hover { background: rgba(125,125,125,.22); }
 
-        .lf-folder-card {
-            background: var(--bg_secondary, rgba(125,125,125,0.05));
-            border: 1px solid var(--outline_tertiary, rgba(125,125,125,0.2));
-            border-radius: 16px; cursor: pointer; transition: all 0.2s ease;
-            display: flex; flex-direction: column; overflow: hidden; height: auto; min-height: 120px; align-self: start; /* 같은 행의 작품 카드 높이에 맞춰 늘어나지 않도록 */
+        .lf-col-rows { display: flex; flex-direction: column; gap: 20px; }
+        .lf-col-row-label {
+            font-size: 12px; font-weight: 600;
+            color: var(--muted-foreground, #888);
+            margin-bottom: 6px; letter-spacing: .04em;
         }
-        .lf-folder-card.expanded { grid-column: 1 / -1; height: auto; border-color: #fb475d; }
-        .lf-folder-summary {
-            padding: 20px; display: flex; flex-direction: column; justify-content: center; align-items: center;
-            height: 100%; gap: 8px; text-align: center;
+        .lf-col-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 8px;
         }
-        .lf-folder-card.expanded > .lf-folder-summary {
-            flex-direction: row; justify-content: flex-start; padding: 14px 20px;
-            border-bottom: 1px solid rgba(125,125,125,0.2); background: rgba(125,125,125,0.1);
-        }
-        .lf-folder-summary .icon { font-size: 30px; }
-        .lf-folder-card.expanded > .lf-folder-summary .icon { font-size: 18px; }
-        .lf-folder-summary .title { font-weight: bold; font-size: 15px; color: var(--text_primary, #000); }
-        .lf-folder-detail { display: none; padding: 20px; background: rgba(0,0,0,0.02); }
-        .lf-folder-card.expanded > .lf-folder-detail { display: block; }
-        .lf-folder-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 16px; }
+        @media (min-width: 640px)  { .lf-col-grid { grid-template-columns: repeat(4, 1fr); } }
+        @media (min-width: 768px)  { .lf-col-grid { grid-template-columns: repeat(5, 1fr); } }
 
-        /* 미분류 신규 카드가 폴더 카드보다 앞(위)에 나타나는 문제 수정.
-           DOM 순서: [신규카드(index 0)][기존카드(hidden)...][폴더카드...]
-           CSS order로 시각적 순서를 역전: 폴더(order:0) → 작품 카드(order:1).
-           React 관리 노드를 물리적으로 이동하지 않으므로 reconciliation 충돌 없음.
-           > (직접 자식 한정) 사용 → 폴더 내부 그리드(.lf-folder-grid) 안의
-           role=button 카드에는 적용되지 않음. */
-        #liked-scroll div.grid[class*="gap-y-10"] > div[role="button"] { order: 1; }
+        a.lf-col-card {
+            display: flex; flex-direction: column; gap: 8px;
+            text-decoration: none; color: inherit; cursor: pointer;
+        }
+        .lf-col-thumbs {
+            display: grid; grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr 1fr; aspect-ratio: 1;
+            border-radius: 10px; overflow: hidden;
+            background: var(--bg_secondary, #f0f0f0);
+        }
+        .lf-col-thumbs img {
+            width: 100%; height: 100%; object-fit: cover; display: block;
+        }
+        .lf-col-thumb-ph {
+            background: rgba(125,125,125,.1); width: 100%; height: 100%;
+        }
+        .lf-col-name {
+            font-size: 13px; font-weight: 600; color: var(--primary, #000);
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .lf-col-count { font-size: 12px; color: var(--muted-foreground, #888); }
 
-        #lf-modal-overlay {
-            position: fixed; inset: 0; background: rgba(0,0,0,.5);
+        /* ── 접기/펼치기 버튼 (공통) ── */
+        #lf-toggle-btn, #lf-col-toggle-btn {
+            font-size: 12px; padding: 2px 10px; border-radius: 6px;
+            border: none; background: rgba(125,125,125,.12);
+            color: inherit; cursor: pointer; font-weight: 500; flex-shrink: 0;
+        }
+        #lf-toggle-btn:hover, #lf-col-toggle-btn:hover { background: rgba(125,125,125,.22); }
+        /* 그리드 헤더 버튼들 사이 간격 */
+        #lf-search-btn, #lf-toggle-btn { margin-right: 6px; }
+
+        /* ── 편집 모달 ── */
+        #lf-col-modal-overlay {
+            position: fixed; inset: 0; background: rgba(0,0,0,.45);
             display: flex; justify-content: center; align-items: center; z-index: 9999;
         }
-        #lf-modal {
-            background: #fff; border-radius: 12px; padding: 20px;
-            width: 800px; max-width: 95vw; height: 550px; max-height: 90vh;
-            display: flex; flex-direction: column; gap: 14px; color: #333;
+        #lf-col-modal {
+            background: #fff; border-radius: 14px; padding: 22px;
+            width: 720px; max-width: 95vw; max-height: 88vh;
+            display: flex; flex-direction: column; gap: 14px;
+            color: #222; box-sizing: border-box;
+        }
+        #lf-col-modal h3 { margin: 0; font-size: 17px; }
+
+        .lf-modal-body {
+            display: flex; gap: 14px; flex: 1; min-height: 0; overflow: hidden;
         }
 
-        #lf-rename-block {
-            display: none; background: rgba(125,125,125,0.08); padding: 14px; border-radius: 8px;
-            flex-direction: column; gap: 10px; border: 1px solid rgba(125,125,125,0.2);
+        /* 왼쪽: 행 목록 */
+        .lf-rows-pane {
+            width: 210px; flex-shrink: 0; display: flex; flex-direction: column;
+            border: 1px solid #ddd; border-radius: 10px; overflow: hidden;
+            background: #fafafa;
         }
-        .lf-rename-row { display: flex; align-items: center; gap: 10px; }
-        .lf-rename-row label { font-size: 12px; font-weight: bold; width: 80px; }
-        .lf-rename-row input, .lf-rename-row select { flex: 1; padding: 6px; border-radius: 4px; border: 1px solid #ccc; font-size: 13px; }
-
-        .lf-modal-top-controls { display: flex; gap: 6px; align-items: center; }
-        .lf-modal-top-controls select { padding: 6px; border-radius: 6px; border: 1px solid #ccc; flex: 1; font-size: 14px; }
-        .lf-modal-top-controls button { padding: 6px 10px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; font-size: 13px; }
-
-        .lf-dual-list { display: flex; flex: 1; gap: 12px; overflow: hidden; min-height: 0; }
-        .lf-pane { flex: 1; display: flex; flex-direction: column; border: 1px solid #ddd; border-radius: 8px; background: #fafafa; overflow: hidden; }
-        .lf-pane-title { padding: 8px; background: #eee; font-weight: bold; font-size: 13px; text-align: center; border-bottom: 1px solid #ddd; }
-        .lf-list-items { flex: 1; overflow-y: auto; padding: 5px; display: flex; flex-direction: column; gap: 2px; }
-
-        .lf-list-item {
-            flex-shrink: 0; display: flex; align-items: center; justify-content: space-between;
-            line-height: 1.4; padding: 6px 10px; font-size: 13px; border-radius: 4px; border: 1px solid transparent;
+        .lf-rows-pane-hdr {
+            padding: 8px 10px; background: #eee; font-weight: 700;
+            font-size: 13px; border-bottom: 1px solid #ddd;
+            display: flex; align-items: center; justify-content: space-between;
         }
-        .lf-list-item:hover { background: #eef; }
-        .lf-work-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
-
-        .lf-item-nav { display: flex; gap: 2px; }
-        .lf-item-nav button {
-            padding: 2px 5px; font-size: 10px; background: #fff; border: 1px solid #ccc;
-            border-radius: 3px; cursor: pointer; color: #666;
+        .lf-rows-pane-hdr button {
+            font-size: 12px; padding: 2px 7px; border-radius: 4px;
+            border: 1px solid #ccc; background: #fff; cursor: pointer;
         }
-        .lf-item-nav button:hover { background: #eee; }
+        .lf-row-list {
+            flex: 1; overflow-y: auto; padding: 4px;
+            display: flex; flex-direction: column; gap: 2px;
+        }
+        .lf-row-item {
+            display: flex; align-items: center; gap: 4px;
+            padding: 6px 8px; border-radius: 6px; cursor: pointer;
+            font-size: 13px; border: 1px solid transparent;
+        }
+        .lf-row-item:hover { background: #eef; }
+        .lf-row-item.selected { background: #e6f0ff; border-color: #aac4f0; font-weight: 600; }
+        .lf-row-item-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .lf-row-btns { display: flex; gap: 2px; }
+        .lf-row-btns button {
+            font-size: 10px; padding: 1px 4px; border-radius: 3px;
+            border: 1px solid #ccc; background: #fff; cursor: pointer; color: #555;
+        }
+        .lf-row-btns button:hover { background: #eee; }
+        .lf-rb-del { color: #c33 !important; }
+        /* 행 이름 편집 아이콘 */
+        .lf-rb-rename {
+            font-size: 12px; padding: 1px 4px; border-radius: 3px;
+            border: none; background: transparent; cursor: pointer;
+            color: #888; flex-shrink: 0; line-height: 1;
+        }
+        .lf-rb-rename:hover { background: #dde8ff; }
+        /* 인라인 편집 input */
+        .lf-row-name-inline-inp {
+            flex: 1; min-width: 0; padding: 1px 6px; border-radius: 4px;
+            border: 1px solid #aac4f0; font-size: 13px; outline: none;
+            background: #fff; font-weight: inherit;
+        }
 
-        .lf-modal-footer { display: flex; justify-content: flex-end; padding-top: 10px; border-top: 1px solid #eee; }
-        .lf-modal-footer button { padding: 8px 20px; border-radius: 6px; background: #007aff; color: #fff; cursor: pointer; font-size: 13px; border: none; }
+        /* 오른쪽: 듀얼 패널 */
+        .lf-dual { flex: 1; display: flex; gap: 10px; min-height: 0; }
+        .lf-pane {
+            flex: 1; display: flex; flex-direction: column;
+            border: 1px solid #ddd; border-radius: 10px;
+            overflow: hidden; background: #fafafa;
+        }
+        .lf-pane-title {
+            padding: 7px 10px; background: #eee; font-weight: 700;
+            font-size: 13px; border-bottom: 1px solid #ddd;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .lf-items-list {
+            flex: 1; overflow-y: auto; padding: 4px;
+            display: flex; flex-direction: column; gap: 2px;
+        }
+        .lf-col-item {
+            display: flex; align-items: center; gap: 6px;
+            padding: 6px 8px; font-size: 13px;
+            border-radius: 5px; border: 1px solid transparent;
+        }
+        .lf-col-item:hover { background: #eef; }
+        .lf-col-item-name {
+            flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .lf-col-ord, .lf-col-action {
+            font-size: 11px; padding: 2px 6px; border-radius: 3px;
+            border: 1px solid #ccc; background: #fff; cursor: pointer;
+            color: #555; flex-shrink: 0;
+        }
+        .lf-col-ord:disabled { opacity: .35; cursor: default; }
+        .lf-col-ord:not(:disabled):hover, .lf-col-action:hover { background: #eee; }
+        .lf-col-action.add { color: #007aff; border-color: #007aff; }
+        .lf-col-action.remove { color: #c33; border-color: #c33; }
 
-        @media (prefers-color-scheme: dark) {
-            #lf-modal { background: #2c2c2c; color: #eee; }
-            .lf-modal-top-controls select, .lf-modal-top-controls button, .lf-rename-row input, .lf-rename-row select { background: #3a3a3a; color: #fff; border-color: #555; }
-            .lf-pane { background: #333; border-color: #444; }
-            .lf-pane-title { background: #222; border-color: #444; }
-            .lf-list-item:hover { background: #444; }
-            .lf-item-nav button { background: #444; color: #ccc; border-color: #666; }
+        /* ── 색상 스와치 (모달 내) ── */
+        .lf-col-swatch {
+            width: 16px; height: 16px; border-radius: 50%;
+            border: 2px solid #bbb; cursor: pointer; flex-shrink: 0;
+            padding: 0; background: #e0e0e0;
+        }
+        .lf-col-swatch:hover { transform: scale(1.15); }
+
+        /* ── 컬렉션 이름 옆 색상 점 ── */
+        .lf-col-name-row {
+            display: flex; align-items: center; gap: 5px;
+        }
+        .lf-col-dot {
+            width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+        }
+
+        /* ── 태그 배지 (카드 내) ── */
+        .lf-tag-wrap {
+            display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px;
+        }
+        .lf-tag-badge {
+            display: inline-flex; align-items: center;
+            font-size: 10px; padding: 1px 6px; border-radius: 9px;
+            white-space: nowrap; line-height: 1.6;
+        }
+
+        .lf-empty-hint {
+            color: #aaa; font-size: 12px; padding: 10px; text-align: center;
+        }
+
+        .lf-modal-footer {
+            display: flex; justify-content: flex-end;
+            padding-top: 10px; border-top: 1px solid #eee;
+        }
+        .lf-modal-footer button {
+            padding: 8px 22px; border-radius: 8px; background: #007aff;
+            color: #fff; cursor: pointer; font-size: 13px;
+            border: none; font-weight: 600;
         }
     `);
 
-    // ─────────────────────────────────────────────
-    // 3. 통합 폴더 관리 모달
-    // ─────────────────────────────────────────────
-    function openManageModal() {
-        const oldOverlay = document.getElementById('lf-modal-overlay');
-        if (oldOverlay) oldOverlay.remove();
+    // ─────────────────────────────────────────────────────────────────
+    // §2. 컬렉션 레이아웃 저장소
+    // 형식: { rows: [{ label: string, ids: string[] }, ...] }
+    // ─────────────────────────────────────────────────────────────────
+    function getLayout() {
+        try {
+            const d = JSON.parse(localStorage.getItem(LAYOUT_KEY) || '{}');
+            if (!Array.isArray(d.rows)) d.rows = [];
+            if (!d.colColors || typeof d.colColors !== 'object') d.colColors = {};
+            return d;
+        } catch { return { rows: [], colColors: {} }; }
+    }
 
-        let folders = getFolders();
-        let currentFolderId = folders.length > 0 ? folders[0].id : null;
+    function getColColor(colId) { return getLayout().colColors[colId] || null; }
+    function setColColor(colId, color) {
+        const layout = getLayout();
+        layout.colColors[colId] = color;
+        saveLayout(layout);
+    }
+    function saveLayout(layout) {
+        localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
+    }
 
-        const grid = document.querySelector(GRID_SEL);
-        const allCards = Array.from(grid?.querySelectorAll(CARD_SEL) || []).filter(c => !c.closest('.lf-folder-card'));
-        const allKeys = allCards.map(c => getCardKey(c)).filter(k => k);
-        // crk:ID → 제목 역방향 맵: 모달 표시용
-        const keyToTitle = new Map(allCards.map(c => [getCardKey(c), c.querySelector(TITLE_SEL)?.textContent?.trim() || '']).filter(([k]) => k));
-        // keyToTitle에 없으면(카드가 찜 취소돼 DOM 부재 등) 복합키에서 제목 파싱.
-        // crk:{uuid}:{title} → title, 그 외 → 키 문자열 그대로.
-        const getLabel = k => keyToTitle.get(k) || (isNewKey(k) ? k.replace(/^crk:[^:]+:/, '') : k);
+    // ─────────────────────────────────────────────────────────────────
+    // §3. 컬렉션 데이터 추출 (캐러셀 DOM → 데이터 배열)
+    // ─────────────────────────────────────────────────────────────────
+    function extractCollections() {
+        const carousel = document.querySelector(CAROUSEL_SEL);
+        if (!carousel) return [];
+        return Array.from(carousel.querySelectorAll(SLIDE_SEL)).flatMap(slide => {
+            const a = slide.querySelector('a[href^="/collections/"]');
+            if (!a) return [];
+            const m = a.href.match(/\/collections\/([a-f0-9]{24})/i);
+            if (!m) return [];
+            const id = m[1];
+            // Emotion 해시 없는 순수 Tailwind: class*= 방식으로 안전하게 탐색
+            const name  = slide.querySelector('p[class*="typo-text-base"]')?.textContent?.trim() || '';
+            const count = slide.querySelector('p[class*="typo-text-sm"]')?.textContent?.trim()  || '';
+            const thumbs = Array.from(slide.querySelectorAll('img')).map(i => i.src).slice(0, 4);
+            return [{ id, name, count, thumbs }];
+        });
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // §4. 컬렉션 그리드 렌더링
+    // ─────────────────────────────────────────────────────────────────
+    let _cachedCollections = [];
+
+    function renderCollectionSection() {
+        document.getElementById('lf-col-section')?.remove();
+
+        const collections = extractCollections();
+        if (!collections.length) return;
+        _cachedCollections = collections;
+
+        // 원본 캐러셀 섹션 숨기기 (React 노드 이동 없이 display:none만)
+        const carouselSection = document.querySelector(CAROUSEL_SEL)?.closest('section');
+        if (carouselSection) carouselSection.style.display = 'none';
+
+        // 레이아웃 초기화/동기화
+        let layout = getLayout();
+        const knownIds = new Set(layout.rows.flatMap(r => r.ids));
+
+        if (!layout.rows.length) {
+            // 최초 실행: 전체를 단일 행으로
+            layout.rows = [{ label: '', ids: collections.map(c => c.id) }];
+            saveLayout(layout);
+        } else {
+            // 신규 컬렉션(아직 레이아웃에 없는 것) → 첫 번째 행 앞에 추가
+            const newIds = collections.map(c => c.id).filter(id => !knownIds.has(id));
+            if (newIds.length) {
+                layout.rows[0].ids = [...newIds, ...layout.rows[0].ids];
+                saveLayout(layout);
+            }
+        }
+
+        // 섹션 DOM 구성
+        const section = document.createElement('div');
+        section.id = 'lf-col-section';
+
+        const hdr = document.createElement('div');
+        hdr.className = 'lf-col-hdr';
+        hdr.innerHTML = `<span class="lf-col-hdr-title">내 컬렉션</span>`;
+
+        const colToggleBtn = document.createElement('button');
+        colToggleBtn.id = 'lf-col-toggle-btn';
+        const initColCollapsed = getColCollapsed();
+        colToggleBtn.textContent = initColCollapsed ? '펼치기 ▼' : '접기 ▲';
+        colToggleBtn.onclick = () => {
+            const next = !getColCollapsed();
+            setColCollapsed(next);
+            rowsWrap.style.display = next ? 'none' : '';
+            colToggleBtn.textContent = next ? '펼치기 ▼' : '접기 ▲';
+        };
+        hdr.appendChild(colToggleBtn);
+
+        const editBtn = document.createElement('button');
+        editBtn.className = 'lf-col-edit-btn';
+        editBtn.textContent = '⚙️ 순서 편집';
+        editBtn.onclick = () => openCollectionEditModal(_cachedCollections);
+        hdr.appendChild(editBtn);
+        section.appendChild(hdr);
+
+        const rowsWrap = document.createElement('div');
+        rowsWrap.className = 'lf-col-rows';
+        const colMap = new Map(collections.map(c => [c.id, c]));
+
+        layout.rows.forEach(row => {
+            const validIds = row.ids.filter(id => colMap.has(id));
+            if (!validIds.length) return;
+
+            const rowWrap = document.createElement('div');
+            if (row.label) {
+                const labelEl = document.createElement('div');
+                labelEl.className = 'lf-col-row-label';
+                labelEl.textContent = row.label;
+                rowWrap.appendChild(labelEl);
+            }
+            const grid = document.createElement('div');
+            grid.className = 'lf-col-grid';
+            validIds.forEach(id => grid.appendChild(buildCollectionCard(colMap.get(id))));
+            rowWrap.appendChild(grid);
+            rowsWrap.appendChild(rowWrap);
+        });
+        section.appendChild(rowsWrap);
+
+        // 초기 collapsed 상태 적용
+        if (initColCollapsed) rowsWrap.style.display = 'none';
+
+        // 캐러셀 섹션 바로 앞에 삽입
+        if (carouselSection) {
+            carouselSection.insertAdjacentElement('beforebegin', section);
+        } else {
+            // 캐러셀 미탐지 시 liked-scroll 내부 첫 flex 컨테이너에 삽입
+            const inner = document.querySelector('#liked-scroll .flex.flex-1.flex-col');
+            if (inner) inner.insertBefore(section, inner.firstChild);
+        }
+    }
+
+    function buildCollectionCard(col) {
+        const color = getColColor(col.id);
+
+        const a = document.createElement('a');
+        a.className = 'lf-col-card';
+        a.href = `/collections/${col.id}`;
+        // SPA 라우터 우회: 원본 캐러셀의 React Router Link를 빌려서 클릭
+        a.onclick = e => {
+            e.preventDefault();
+            const origLink = document.querySelector(
+                `${CAROUSEL_SEL} a[href*="/collections/${col.id}"]`
+            );
+            if (origLink) {
+                origLink.dispatchEvent(
+                    new MouseEvent('click', { bubbles: true, cancelable: true })
+                );
+            } else {
+                // fallback: history API (라우터가 popstate를 감지하는 경우)
+                window.history.pushState({}, '', `/collections/${col.id}`);
+                window.dispatchEvent(new PopStateEvent('popstate'));
+            }
+        };
+
+        // 썸네일
+        const thumbs = document.createElement('div');
+        thumbs.className = 'lf-col-thumbs';
+        for (let i = 0; i < 4; i++) {
+            if (col.thumbs[i]) {
+                const img = document.createElement('img');
+                img.src = col.thumbs[i];
+                img.alt = '';
+                img.loading = 'lazy';
+                thumbs.appendChild(img);
+            } else {
+                const ph = document.createElement('div');
+                ph.className = 'lf-col-thumb-ph';
+                thumbs.appendChild(ph);
+            }
+        }
+        a.appendChild(thumbs);
+
+        // 이름 행 (색상 점 포함)
+        const nameRow = document.createElement('div');
+        nameRow.className = 'lf-col-name-row';
+        if (color) {
+            const dot = document.createElement('span');
+            dot.className = 'lf-col-dot';
+            dot.style.background = color;
+            nameRow.appendChild(dot);
+        }
+        const name = document.createElement('p');
+        name.className = 'lf-col-name';
+        name.textContent = col.name;
+        nameRow.appendChild(name);
+        a.appendChild(nameRow);
+
+        const count = document.createElement('p');
+        count.className = 'lf-col-count';
+        count.textContent = col.count;
+        a.appendChild(count);
+
+        return a;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // §5. 컬렉션 편집 모달
+    // ─────────────────────────────────────────────────────────────────
+    function openCollectionEditModal(collections) {
+        document.getElementById('lf-col-modal-overlay')?.remove();
+
+        const colMap = new Map(collections.map(c => [c.id, c]));
+        let layout = getLayout();
+        let selIdx = layout.rows.length > 0 ? 0 : -1;
 
         const overlay = document.createElement('div');
-        overlay.id = 'lf-modal-overlay';
+        overlay.id = 'lf-col-modal-overlay';
         overlay.innerHTML = `
-            <div id="lf-modal" onclick="event.stopPropagation()">
-                <h3>
-                    <span>⚙️ 통합 폴더 관리 v2.0.7</span>
-                    <span style="font-size:11px; font-weight:normal; opacity:0.6;">(클릭 시 즉시 이동)</span>
-                </h3>
-
-                <div id="lf-rename-block">
-                    <div class="lf-rename-row">
-                        <label>이름 수정</label>
-                        <input type="text" id="lf-rename-input">
+            <div id="lf-col-modal" onclick="event.stopPropagation()">
+                <h3>컬렉션 순서 편집</h3>
+                <div class="lf-modal-body">
+                    <div class="lf-rows-pane">
+                        <div class="lf-rows-pane-hdr">
+                            <span>행 목록</span>
+                            <button id="lf-add-row-btn">+ 행 추가</button>
+                        </div>
+                        <div class="lf-row-list" id="lf-row-list"></div>
                     </div>
-                    <div class="lf-rename-row">
-                        <label>이 폴더의 상위 폴더</label>
-                        <select id="lf-parent-select"></select>
-                    </div>
-                    <div style="display:flex; justify-content:flex-end; gap:6px; margin-top:4px;">
-                        <button id="lf-btn-rename-confirm" style="background:#007aff; color:#fff; border:none; padding:5px 12px; border-radius:4px; cursor:pointer;">적용</button>
-                        <button id="lf-btn-rename-cancel" style="border:1px solid #ccc; padding:5px 12px; border-radius:4px; cursor:pointer;">닫기</button>
-                    </div>
-                </div>
-
-                <div class="lf-modal-top-controls">
-                    <select id="lf-folder-select"></select>
-                    <button id="lf-btn-up-folder" title="폴더 순서 위로">▲</button>
-                    <button id="lf-btn-down-folder" title="폴더 순서 아래로">▼</button>
-                    <button id="lf-btn-rename-folder">이름/상위 설정</button>
-                    <button id="lf-btn-new-folder">+ 새 폴더</button>
-                    <button id="lf-btn-del-folder" style="color:#ff3b30;">삭제</button>
-                </div>
-
-                <div class="lf-dual-list">
-                    <div class="lf-pane">
-                        <div class="lf-pane-title">미분류 작품</div>
-                        <div class="lf-list-items" id="lf-unassigned-list"></div>
-                    </div>
-                    <div class="lf-pane">
-                        <div class="lf-pane-title">폴더 내 작품 (순서 변경 가능)</div>
-                        <div class="lf-list-items" id="lf-folder-list"></div>
-                    </div>
+                    <div class="lf-dual" id="lf-dual"></div>
                 </div>
                 <div class="lf-modal-footer">
-                    <button id="lf-btn-close">닫기</button>
+                    <button id="lf-col-modal-close">완료</button>
                 </div>
             </div>
         `;
         document.body.appendChild(overlay);
 
-        const selectEl = document.getElementById('lf-folder-select');
-        const unassignedEl = document.getElementById('lf-unassigned-list');
-        const folderListEl = document.getElementById('lf-folder-list');
-        const renameBlock = document.getElementById('lf-rename-block');
-        const parentSelect = document.getElementById('lf-parent-select');
+        function save() { saveLayout(layout); }
 
-        function renderModalUI() {
-            folders = getFolders();
-            selectEl.innerHTML = '';
-            if (folders.length === 0) {
-                selectEl.innerHTML = '<option value="">폴더를 먼저 생성해주세요</option>';
-                currentFolderId = null;
-            } else {
-                // 루트 폴더별로 <optgroup>으로 묶어 구분선 삽입
-                // - optgroup label = 루트 폴더명 (비선택 헤더 역할)
-                // - 루트 폴더 자체 + 직계 자식을 같은 그룹 안에 배치
-                const roots = folders.filter(f => !f.parentId);
-                const childMap = {};
-                folders.filter(f => f.parentId).forEach(f => {
-                    (childMap[f.parentId] ??= []).push(f);
-                });
-                roots.forEach(root => {
-                    const grp = document.createElement('optgroup');
-                    grp.label = `📁 ${root.name}`;
+        function close() {
+            overlay.remove();
+            renderCollectionSection();
+        }
 
-                    const rootOpt = document.createElement('option');
-                    rootOpt.value = root.id;
-                    rootOpt.textContent = `${root.name} (${root.items.length})`;
-                    if (root.id === currentFolderId) rootOpt.selected = true;
-                    grp.appendChild(rootOpt);
+        overlay.onclick = close;
+        document.getElementById('lf-col-modal-close').onclick = close;
+        document.getElementById('lf-add-row-btn').onclick = () => {
+            layout.rows.push({ label: '', ids: [] });
+            selIdx = layout.rows.length - 1;
+            save();
+            renderRowList();
+        };
 
-                    (childMap[root.id] || []).forEach(child => {
-                        const childOpt = document.createElement('option');
-                        childOpt.value = child.id;
-                        childOpt.textContent = `  ㄴ ${child.name} (${child.items.length})`;
-                        if (child.id === currentFolderId) childOpt.selected = true;
-                        grp.appendChild(childOpt);
-                    });
+        // ── 행 목록 ──
+        function renderRowList() {
+            const list = document.getElementById('lf-row-list');
+            if (!list) return;
+            list.innerHTML = '';
 
-                    selectEl.appendChild(grp);
-                });
-
-                if (!currentFolderId) currentFolderId = folders[0].id;
+            if (!layout.rows.length) {
+                list.innerHTML = '<div class="lf-empty-hint">행이 없습니다</div>';
+                renderDual();
+                return;
             }
 
-            const assignedKeys = new Set(folders.flatMap(f => f.items));
-
-            unassignedEl.innerHTML = '';
-            allKeys.filter(k => !assignedKeys.has(k)).forEach(k => {
-                const div = document.createElement('div');
-                div.className = 'lf-list-item';
-                div.innerHTML = `<span class="lf-work-name" title="${getLabel(k)}">${getLabel(k)}</span>`;
-                div.querySelector('.lf-work-name').onclick = () => {
-                    if (!currentFolderId) return;
-                    const folder = folders.find(f => f.id === currentFolderId);
-                    folder.items.push(k);
-                    saveFolders(folders);
-                    renderAll();
-                    renderModalUI();
+            layout.rows.forEach((row, idx) => {
+                const item = document.createElement('div');
+                item.className = 'lf-row-item' + (idx === selIdx ? ' selected' : '');
+                item.innerHTML = `
+                    <button class="lf-rb-rename" title="행 이름 편집">✏️</button>
+                    <span class="lf-row-item-name">${_esc(row.label || '(이름 없음)')}
+                        <span style="color:#aaa;font-size:11px;font-weight:400;">${row.ids.length}개</span>
+                    </span>
+                    <div class="lf-row-btns">
+                        <button class="rb-up" title="위로">▲</button>
+                        <button class="rb-dn" title="아래로">▼</button>
+                        <button class="rb-del lf-rb-del" title="삭제">✕</button>
+                    </div>
+                `;
+                // ✏️ 클릭 → 이름 span을 input으로 교체 (인라인 편집)
+                item.querySelector('.lf-rb-rename').onclick = e => {
+                    e.stopPropagation();
+                    if (item.querySelector('.lf-row-name-inline-inp')) return;
+                    const nameSpan = item.querySelector('.lf-row-item-name');
+                    const inp = document.createElement('input');
+                    inp.className = 'lf-row-name-inline-inp';
+                    inp.value = row.label;
+                    inp.placeholder = '행 이름 (선택)';
+                    const finish = () => {
+                        row.label = inp.value.trim();
+                        save();
+                        renderRowList();
+                    };
+                    inp.onblur = finish;
+                    inp.onkeydown = e2 => {
+                        e2.stopPropagation();
+                        if (e2.key === 'Enter') inp.blur();
+                        if (e2.key === 'Escape') { inp.value = row.label; inp.blur(); }
+                    };
+                    nameSpan.replaceWith(inp);
+                    inp.focus(); inp.select();
                 };
-                unassignedEl.appendChild(div);
-            });
-
-            folderListEl.innerHTML = '';
-            if (currentFolderId) {
-                const currentFolder = folders.find(f => f.id === currentFolderId);
-                if (currentFolder) {
-                    currentFolder.items.forEach((k, idx) => {
-                        const div = document.createElement('div');
-                        div.className = 'lf-list-item';
-                        div.innerHTML = `
-                            <span class="lf-work-name" title="${getLabel(k)}">${getLabel(k)}</span>
-                            <div class="lf-item-nav">
-                                <button class="lf-item-up">▲</button>
-                                <button class="lf-item-down">▼</button>
-                            </div>
-                        `;
-                        div.querySelector('.lf-work-name').onclick = () => {
-                            currentFolder.items.splice(idx, 1);
-                            saveFolders(folders);
-                            renderAll();
-                            renderModalUI();
-                        };
-                        div.querySelector('.lf-item-up').onclick = (e) => {
-                            e.stopPropagation();
-                            if (idx > 0) {
-                                [currentFolder.items[idx], currentFolder.items[idx-1]] = [currentFolder.items[idx-1], currentFolder.items[idx]];
-                                saveFolders(folders);
-                                renderAll();
-                                renderModalUI();
-                            }
-                        };
-                        div.querySelector('.lf-item-down').onclick = (e) => {
-                            e.stopPropagation();
-                            if (idx < currentFolder.items.length - 1) {
-                                [currentFolder.items[idx], currentFolder.items[idx+1]] = [currentFolder.items[idx+1], currentFolder.items[idx]];
-                                saveFolders(folders);
-                                renderAll();
-                                renderModalUI();
-                            }
-                        };
-                        folderListEl.appendChild(div);
-                    });
-                }
-            }
-        }
-
-        selectEl.onchange = (e) => {
-            currentFolderId = e.target.value;
-            renameBlock.style.display = 'none';
-            renderModalUI();
-        };
-
-        document.getElementById('lf-btn-rename-folder').onclick = () => {
-            if (!currentFolderId) return;
-            const folder = folders.find(f => f.id === currentFolderId);
-            document.getElementById('lf-rename-input').value = folder.name;
-
-            parentSelect.innerHTML = '<option value="">없음 (최상위)</option>';
-            folders.forEach(f => {
-                if (f.id !== currentFolderId && f.parentId !== currentFolderId) {
-                    const opt = document.createElement('option');
-                    opt.value = f.id;
-                    opt.textContent = f.name;
-                    if (f.id === folder.parentId) opt.selected = true;
-                    parentSelect.appendChild(opt);
-                }
-            });
-
-            renameBlock.style.display = 'flex';
-        };
-
-        document.getElementById('lf-btn-rename-confirm').onclick = () => {
-            const folderIndex = folders.findIndex(f => f.id === currentFolderId);
-            if (folderIndex === -1) return;
-
-            const folder = folders[folderIndex];
-            const newParentId = parentSelect.value || null;
-
-            folder.name = document.getElementById('lf-rename-input').value.trim() || folder.name;
-
-            if (folder.parentId !== newParentId) {
-                folder.parentId = newParentId;
-
-                if (newParentId) {
-                    const [movedFolder] = folders.splice(folderIndex, 1);
-                    const parentIndex = folders.findIndex(f => f.id === newParentId);
-
-                    if (parentIndex !== -1) {
-                        // parentIndex+1에 바로 삽입하면 기존 직계 자식들보다 앞에 끼어들어
-                        // 모달 목록 상 순서가 맨 위로 올라가는 것처럼 보임.
-                        // 기존 직계 자식을 모두 건너뛴 뒤 맨 마지막 자리에 삽입.
-                        let insertAt = parentIndex + 1;
-                        while (insertAt < folders.length && folders[insertAt].parentId === newParentId) {
-                            insertAt++;
+                item.querySelector('.rb-up').onclick = e => { e.stopPropagation(); moveRow(idx, -1); };
+                item.querySelector('.rb-dn').onclick = e => { e.stopPropagation(); moveRow(idx, 1); };
+                item.querySelector('.rb-del').onclick = e => {
+                    e.stopPropagation();
+                    const orphaned = layout.rows[idx].ids;
+                    layout.rows.splice(idx, 1);
+                    if (orphaned.length) {
+                        if (layout.rows.length) {
+                            layout.rows[0].ids = [...orphaned, ...layout.rows[0].ids];
+                        } else {
+                            layout.rows = [{ label: '', ids: orphaned }];
                         }
-                        folders.splice(insertAt, 0, movedFolder);
-                    } else {
-                        folders.push(movedFolder);
                     }
-                }
-            }
+                    selIdx = Math.min(selIdx, layout.rows.length - 1);
+                    save();
+                    renderRowList();
+                };
+                item.onclick = () => { selIdx = idx; renderRowList(); };
+                list.appendChild(item);
+            });
 
-            saveFolders(folders);
-            renderAll();
-            renameBlock.style.display = 'none';
-            renderModalUI();
-        };
-
-        document.getElementById('lf-btn-rename-cancel').onclick = () => renameBlock.style.display = 'none';
-
-        // 폴더 블록의 끝 인덱스(exclusive) 반환.
-        // 해당 폴더 + 모든 하위 폴더(재귀)를 하나의 블록으로 처리.
-        // 단순 인접 요소 교환은 하위 폴더가 있는 루트 폴더에서 루트-자식 간
-        // 교환만 일어나 시각 순서가 전혀 바뀌지 않는 문제 해결을 위해 도입.
-        function getBlockEnd(arr, startIdx) {
-            const owned = new Set([arr[startIdx].id]);
-            let i = startIdx + 1;
-            while (i < arr.length) {
-                if (arr[i].parentId && owned.has(arr[i].parentId)) {
-                    owned.add(arr[i].id);
-                    i++;
-                } else break;
-            }
-            return i;
+            renderDual();
         }
 
-        document.getElementById('lf-btn-up-folder').onclick = () => {
-            const idx = folders.findIndex(f => f.id === currentFolderId);
-            if (idx <= 0) return;
-
-            const parentId = folders[idx].parentId;
-            // 같은 부모를 가진 이전 형제 찾기 (단순 idx-1이 아닌 동일 parentId 기준)
-            let prevSibIdx = -1;
-            for (let i = idx - 1; i >= 0; i--) {
-                if (folders[i].parentId === parentId) { prevSibIdx = i; break; }
-            }
-            if (prevSibIdx === -1) return;
-
-            // 현재 블록을 먼저 제거(뒤쪽이므로 이전 블록 인덱스에 영향 없음)
-            const currBlock = folders.splice(idx, getBlockEnd(folders, idx) - idx);
-            // 이전 형제 블록 제거 (원래 idx 위치까지 = spliced 후에도 동일)
-            const prevBlock = folders.splice(prevSibIdx, idx - prevSibIdx);
-            // 이전 형제 위치에 현재 블록 → 이전 블록 순으로 삽입
-            folders.splice(prevSibIdx, 0, ...currBlock, ...prevBlock);
-
-            saveFolders(folders);
-            renderAll();
-            renderModalUI();
-        };
-
-        document.getElementById('lf-btn-down-folder').onclick = () => {
-            const idx = folders.findIndex(f => f.id === currentFolderId);
-            if (idx < 0) return;
-
-            const parentId = folders[idx].parentId;
-            const currEnd = getBlockEnd(folders, idx);
-
-            // 현재 블록 이후에서 같은 부모를 가진 다음 형제 찾기
-            let nextSibIdx = -1;
-            for (let i = currEnd; i < folders.length; i++) {
-                if (folders[i].parentId === parentId) { nextSibIdx = i; break; }
-            }
-            if (nextSibIdx === -1) return;
-
-            // 다음 형제 블록을 제거한 뒤 현재 블록 앞에 삽입
-            const nextBlock = folders.splice(nextSibIdx, getBlockEnd(folders, nextSibIdx) - nextSibIdx);
-            folders.splice(idx, 0, ...nextBlock);
-
-            saveFolders(folders);
-            renderAll();
-            renderModalUI();
-        };
-
-        document.getElementById('lf-btn-new-folder').onclick = () => {
-            const newId = 'lf_' + Date.now();
-            folders.push({ id: newId, name: '새 폴더', items: [], parentId: null });
-            currentFolderId = newId;
-            saveFolders(folders);
-            renderAll();
-            renderModalUI();
-        };
-
-        document.getElementById('lf-btn-del-folder').onclick = () => {
-            if (!currentFolderId) return;
-            if (confirm("이 폴더를 삭제할까요? 하위 폴더가 있다면 상위로 이동됩니다.")) {
-                folders.forEach(f => { if(f.parentId === currentFolderId) f.parentId = null; });
-                folders = folders.filter(f => f.id !== currentFolderId);
-                currentFolderId = folders.length > 0 ? folders[0].id : null;
-                saveFolders(folders);
-                renderAll();
-                renderModalUI();
-            }
-        };
-
-        document.getElementById('lf-btn-close').onclick = () => overlay.remove();
-        overlay.onclick = () => overlay.remove();
-
-        renderModalUI();
-    }
-
-// ─────────────────────────────────────────────
-    // 4. 메인 화면 렌더링
-    // ─────────────────────────────────────────────
-
-    function kickstartInfiniteScroll() {
-        if (window.scrollY + window.innerHeight >= document.body.scrollHeight - 300) {
-            const tempBlock = document.createElement('div');
-            tempBlock.style.height = '2000px';
-            document.body.appendChild(tempBlock);
-            setTimeout(() => tempBlock.remove(), 50);
+        function moveRow(idx, dir) {
+            const to = idx + dir;
+            if (to < 0 || to >= layout.rows.length) return;
+            [layout.rows[idx], layout.rows[to]] = [layout.rows[to], layout.rows[idx]];
+            selIdx = to;
+            save();
+            renderRowList();
         }
-    }
 
-    function renderAll() {
-        const grid = document.querySelector(GRID_SEL);
-        if (!grid) return;
+        // ── 듀얼 패널 (미배치 ↔ 이 행) ──
+        function renderDual() {
+            const dual = document.getElementById('lf-dual');
+            if (!dual) return;
+            dual.innerHTML = '';
 
-        const folders = getFolders();
-        migrateKeysIfNeeded(folders); // 구형식 키(제목) → 신형식(crk:ID) 일회성 변환
-        const assignedKeys = new Set(folders.flatMap(f => f.items));
-
-        grid.querySelectorAll('.lf-folder-card').forEach(el => el.remove());
-        grid.querySelectorAll('#lf-scroll-spacer').forEach(el => el.remove());
-        grid.style.paddingBottom = '0px';
-
-        const allCards = Array.from(grid.querySelectorAll(CARD_SEL)).filter(c => !c.closest('.lf-folder-card'));
-
-        allCards.forEach(card => {
-            if (assignedKeys.has(getCardKey(card))) {
-                card.style.display = 'none';
-            } else {
-                card.style.display = '';
+            if (selIdx < 0 || !layout.rows[selIdx]) {
+                dual.innerHTML = '<div class="lf-empty-hint" style="align-self:center;flex:1;font-size:13px;">행을 선택하거나 추가하세요</div>';
+                return;
             }
-        });
 
-        function createFolderElement(folderData, parentGrid) {
-            const folderCards = allCards.filter(card => folderData.items.includes(getCardKey(card)));
-            const subFolders = folders.filter(f => f.parentId === folderData.id);
+            const row = layout.rows[selIdx];
+            const assignedAll = new Set(layout.rows.flatMap(r => r.ids));
+            const unassigned = collections.filter(c => !assignedAll.has(c.id));
 
-            const folderBlock = document.createElement('div');
-            folderBlock.className = 'lf-folder-card';
-            folderBlock.innerHTML = `
-                <div class="lf-folder-summary">
-                    <span class="icon">📁</span>
-                    <span class="title">${folderData.name}</span>
-                    <span class="count">${folderCards.length}개 작품<br>${subFolders.length}개 폴더</span>
+            dual.innerHTML = `
+                <div class="lf-pane">
+                    <div class="lf-pane-title">미배치 컬렉션</div>
+                    <div class="lf-items-list" id="lf-unassigned"></div>
                 </div>
-                <div class="lf-folder-detail">
-                    <div class="lf-folder-grid"></div>
+                <div class="lf-pane" style="flex:1.4;">
+                    <div class="lf-pane-title">이 행의 컬렉션</div>
+                    <div class="lf-items-list" id="lf-assigned"></div>
                 </div>
             `;
 
-            const innerGrid = folderBlock.querySelector('.lf-folder-grid');
-
-            subFolders.forEach(sub => createFolderElement(sub, innerGrid));
-
-            folderData.items.forEach(key => {
-                const origin = allCards.find(c => getCardKey(c) === key);
-                if (origin) {
-                    const clone = origin.cloneNode(true);
-                    clone.style.cssText = 'width: 100%;';
-                    clone.onclick = () => origin.click();
-                    innerGrid.appendChild(clone);
-                }
+            // 미배치 목록
+            const unassignedEl = document.getElementById('lf-unassigned');
+            unassigned.forEach(col => {
+                const item = document.createElement('div');
+                item.className = 'lf-col-item';
+                item.innerHTML = `<span class="lf-col-item-name">${_esc(col.name)}</span>
+                    <button class="lf-col-action add">추가 →</button>`;
+                item.querySelector('button').onclick = () => {
+                    row.ids.push(col.id);
+                    save();
+                    renderDual();
+                };
+                unassignedEl.appendChild(item);
             });
+            if (!unassigned.length) {
+                unassignedEl.innerHTML = '<div class="lf-empty-hint">모두 배치됨</div>';
+            }
 
-            folderBlock.querySelector('.lf-folder-summary').onclick = (e) => {
-                e.stopPropagation();
-                folderBlock.classList.toggle('expanded');
-            };
+            // 배치된 목록
+            const assignedEl = document.getElementById('lf-assigned');
+            row.ids.forEach((id, idx) => {
+                const col = colMap.get(id);
+                if (!col) return;
+                const item = document.createElement('div');
+                item.className = 'lf-col-item';
 
-            parentGrid.appendChild(folderBlock); // insertBefore 패턴을 버리고 appendChild로 교체 → 배열 순서 = 렌더 순서
+                // 색상 스와치
+                const swatch = document.createElement('button');
+                swatch.className = 'lf-col-swatch';
+                const curColor = layout.colColors?.[id] || '';
+                swatch.style.background = curColor || '#e0e0e0';
+                swatch.style.borderColor = curColor || '#bbb';
+                swatch.title = '색상 지정 (클릭)';
+                swatch.onclick = e => {
+                    e.stopPropagation();
+                    const picker = document.createElement('input');
+                    picker.type = 'color';
+                    picker.value = curColor || '#888888';
+                    picker.style.cssText = 'position:absolute;opacity:0;width:0;height:0;pointer-events:none;';
+                    document.body.appendChild(picker);
+                    picker.oninput = ev => {
+                        if (!layout.colColors) layout.colColors = {};
+                        layout.colColors[id] = ev.target.value;
+                        swatch.style.background = ev.target.value;
+                        swatch.style.borderColor = ev.target.value;
+                        save();
+                    };
+                    picker.onchange = () => {
+                        picker.remove();
+                        renderCollectionSection(); // 그리드 색상 점 즉시 반영
+                    };
+                    picker.click();
+                };
+                item.appendChild(swatch);
+
+                const nameSpan = document.createElement('span');
+                nameSpan.className = 'lf-col-item-name';
+                nameSpan.textContent = col.name;
+                item.appendChild(nameSpan);
+
+                const up  = document.createElement('button');
+                up.className  = 'lf-col-ord';
+                up.textContent = '▲';
+                up.disabled = idx === 0;
+                up.title = '위로';
+
+                const dn  = document.createElement('button');
+                dn.className  = 'lf-col-ord';
+                dn.textContent = '▼';
+                dn.disabled = idx === row.ids.length - 1;
+                dn.title = '아래로';
+
+                const rm  = document.createElement('button');
+                rm.className  = 'lf-col-action remove';
+                rm.textContent = '✕';
+                rm.title = '제거';
+
+                up.onclick = () => { [row.ids[idx-1], row.ids[idx]] = [row.ids[idx], row.ids[idx-1]]; save(); renderDual(); };
+                dn.onclick = () => { [row.ids[idx], row.ids[idx+1]] = [row.ids[idx+1], row.ids[idx]]; save(); renderDual(); };
+                rm.onclick = () => { row.ids.splice(idx, 1); save(); renderDual(); };
+
+                [up, dn, rm].forEach(b => item.appendChild(b));
+                assignedEl.appendChild(item);
+            });
+            if (!row.ids.length) {
+                assignedEl.innerHTML = '<div class="lf-empty-hint">비어있음</div>';
+            }
         }
 
-        folders.filter(f => !f.parentId).forEach(rootFolder => { // .reverse() 제거: appendChild로 변경했으므로 역순 보정 불필요
-            createFolderElement(rootFolder, grid);
-        });
-
-        const searchInput = document.getElementById('lf-search-input');
-        if (searchInput?.value) applySearch(searchInput.value.toLowerCase().trim());
-
-        kickstartInfiniteScroll();
+        renderRowList();
     }
 
+    function _esc(s) {
+        return (s || '').replace(/[&<>"']/g, c => (
+            { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]
+        ));
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // §6. 접기/펼치기 상태 관리
+    // ─────────────────────────────────────────────────────────────────
+
+    // 작품 그리드
+    function getGridCollapsed() {
+        return localStorage.getItem(COLLAPSE_KEY) === 'true';
+    }
+    function setGridCollapsed(v) {
+        localStorage.setItem(COLLAPSE_KEY, v ? 'true' : 'false');
+    }
+
+    // 컬렉션 섹션
+    function getColCollapsed() {
+        return localStorage.getItem(COL_COLLAPSE_KEY) === 'true';
+    }
+    function setColCollapsed(v) {
+        localStorage.setItem(COL_COLLAPSE_KEY, v ? 'true' : 'false');
+    }
+
+    // 그리드 헤더: [좋아요한 스토리(flex:1)] [접기▲] [컬렉션 담기]
+    // 검색창은 initSearchBar에서 탭 아래에 별도 삽입
+    function initGridArea() {
+        // ID 기반 가드 — previousElementSibling 변동으로 인한 무한 재실행 방지
+        if (document.getElementById('lf-toggle-btn')) return;
+
+        const grid = document.querySelector(GRID_SEL);
+        if (!grid) return;
+
+        // grid 이전 형제 중 h2를 포함한 헤더를 명시적으로 탐색
+        // (#lf-search-bar가 중간에 삽입된 경우에도 올바른 헤더를 찾음)
+        let header = grid.previousElementSibling;
+        while (header && !header.querySelector('h2')) {
+            header = header.previousElementSibling;
+        }
+        if (!header) return;
+
+        const h2 = header.querySelector('h2');
+        if (h2) h2.style.flex = '1';
+
+        const addLink = header.querySelector('a[href*="/collections/add"]');
+
+        // 접기 버튼
+        const toggleBtn = document.createElement('button');
+        toggleBtn.id = 'lf-toggle-btn';
+        const collapsed = getGridCollapsed();
+        toggleBtn.textContent = collapsed ? '펼치기 ▼' : '접기 ▲';
+        if (collapsed) grid.style.display = 'none';
+        toggleBtn.onclick = () => {
+            const next = !getGridCollapsed();
+            setGridCollapsed(next);
+            grid.style.display = next ? 'none' : '';
+            toggleBtn.textContent = next ? '펼치기 ▼' : '접기 ▲';
+        };
+
+        if (addLink) {
+            addLink.insertAdjacentElement('beforebegin', toggleBtn);
+        } else if (h2) {
+            h2.insertAdjacentElement('afterend', toggleBtn);
+        } else {
+            header.appendChild(toggleBtn);
+        }
+    }
+
+    // 탭 아래 고정 검색창 (항상 표시, #crk-liked-tabs 기준 sticky)
+    function initSearchBar() {
+        if (document.getElementById('lf-search-bar')) return;
+
+        const crkTab = document.getElementById('crk-liked-tabs');
+        if (!crkTab) return;
+        const tabContainer = crkTab.closest('[dir="ltr"]') ?? crkTab.parentElement;
+        if (!tabContainer) return;
+
+        const bar = document.createElement('div');
+        bar.id = 'lf-search-bar';
+        bar.innerHTML = `<input type="text" id="lf-search-input" class="lf-search-input"
+            placeholder="작품 제목으로 검색...">`;
+
+        // 탭 컨테이너 바로 다음 형제로 삽입
+        tabContainer.insertAdjacentElement('afterend', bar);
+
+        // sticky top = #crk-liked-tabs의 computed top + 높이
+        function updateTop() {
+            const st = getComputedStyle(crkTab);
+            const tabTop = parseFloat(st.top) || 0;
+            bar.style.top = (tabTop + crkTab.offsetHeight) + 'px';
+        }
+        updateTop();
+        new ResizeObserver(updateTop).observe(crkTab);
+
+        bar.querySelector('#lf-search-input').oninput = e =>
+            applySearch(e.target.value.toLowerCase().trim());
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // §9. 검색
+    // ─────────────────────────────────────────────────────────────────
     function applySearch(query) {
         const grid = document.querySelector(GRID_SEL);
         if (!grid) return;
-        const assignedKeys = new Set(getFolders().flatMap(f => f.items));
 
-        // 미분류 카드 처리 (폴더 밖 카드)
-        grid.querySelectorAll(CARD_SEL).forEach(card => {
-            if (card.closest('.lf-folder-card')) return;
-            const key = getCardKey(card);
-            if (assignedKeys.has(key)) return;
-            if (!query) { card.style.display = ''; return; }
-            const titleText = card.querySelector(TITLE_SEL)?.textContent.toLowerCase() || '';
-            card.style.display = titleText.includes(query) ? '' : 'none';
-        });
-
-        // 폴더 카드 재귀 처리: 매칭 여부(boolean)를 반환
-        function processFolderBlock(folderBlock) {
-            const innerGrid = folderBlock.querySelector('.lf-folder-grid');
-
-            if (!query) {
-                // 검색어 없음: 모든 폴더 초기 상태로 복원
-                folderBlock.style.display = '';
-                folderBlock.classList.remove('expanded');
-                if (innerGrid) {
-                    innerGrid.querySelectorAll(':scope > [role="button"]').forEach(c => c.style.display = '');
-                    innerGrid.querySelectorAll(':scope > .lf-folder-card').forEach(sub => processFolderBlock(sub));
-                }
-                return true;
-            }
-
-            if (!innerGrid) {
-                folderBlock.style.display = 'none';
-                return false;
-            }
-
-            let hasMatch = false;
-
-            // 직속 아이템 카드 필터링
-            innerGrid.querySelectorAll(':scope > [role="button"]').forEach(card => {
-                const titleText = card.querySelector(TITLE_SEL)?.textContent.toLowerCase() || '';
-                const matched = titleText.includes(query);
-                card.style.display = matched ? '' : 'none';
-                if (matched) hasMatch = true;
-            });
-
-            // 하위 폴더 재귀 처리
-            innerGrid.querySelectorAll(':scope > .lf-folder-card').forEach(sub => {
-                if (processFolderBlock(sub)) hasMatch = true;
-            });
-
-            // 매칭 항목이 있으면 펼침, 없으면 숨김
-            if (hasMatch) {
-                folderBlock.style.display = '';
-                folderBlock.classList.add('expanded');
-            } else {
-                folderBlock.style.display = 'none';
-                folderBlock.classList.remove('expanded');
-            }
-
-            return hasMatch;
+        // 검색어가 있으면 접힌 그리드 자동 펼침
+        if (query && getGridCollapsed()) {
+            setGridCollapsed(false);
+            grid.style.display = '';
+            const btn = document.getElementById('lf-toggle-btn');
+            if (btn) btn.textContent = '접기 ▲';
         }
 
-        // 최상위 폴더만 순회 (하위 폴더는 재귀 내부에서 처리)
-        grid.querySelectorAll(':scope > .lf-folder-card').forEach(folderBlock => {
-            processFolderBlock(folderBlock);
+        grid.querySelectorAll(CARD_SEL).forEach(card => {
+            if (!query) { card.style.display = ''; return; }
+            const t = card.querySelector(TITLE_SEL)?.textContent.toLowerCase() || '';
+            card.style.display = t.includes(query) ? '' : 'none';
         });
     }
 
-    function initUI() {
-        const titleElement = document.querySelector(PAGE_TITLE_SEL);
-        if (!titleElement || document.getElementById('lf-sticky-header')) return;
-
-        // ⚠️ v1.1.0 이하 구조: titleElement(React 관리 노드)를 wrapper div 안으로 이동시킴.
-        //   → 신규 탭(스토리/캐릭터/나만의 태그) UI 추가로 이 영역의 리렌더링 빈도가 늘면서,
-        //     React reconciliation이 기대 위치(title 직속)에 다른 태그(div)가 있는 것을 감지 →
-        //     서브트리를 통째로 버리고 title을 새로 생성 → 주입했던 UI 전체가 함께 삭제되는 것으로 추정.
-        //     (정적 캡처상 css-342uqh title이 스크립트 흔적 전혀 없는 순수 상태로 존재 — 정황 증거)
-        // ✅ v1.2.0: titleElement는 절대 이동·래핑하지 않고 형제 노드로만 삽입 → 재조정 충돌 원천 차단.
-        const stickyWrap = document.createElement('div');
-        stickyWrap.id = 'lf-sticky-header';
-        stickyWrap.innerHTML = `
-            <div class="lf-header-container">
-                <span class="lf-header-title-text">${titleElement.textContent.trim()}</span>
-                <button class="lf-manage-btn">⚙️ 폴더 관리</button>
-            </div>
-            <div class="lf-search-wrap">
-                <input type="text" id="lf-search-input" class="lf-search-input" placeholder="작품 제목으로 검색...">
-            </div>
-        `;
-        titleElement.insertAdjacentElement('afterend', stickyWrap);
-        // 원본 <p>는 DOM에 그대로 두되 숨김(display:none은 React가 되돌리지 않음).
-        // sticky header 안의 복사본이 제목 역할을 대신하므로 중복 표시 방지.
-        titleElement.style.display = 'none';
-
-        stickyWrap.querySelector('.lf-manage-btn').onclick = openManageModal;
-        stickyWrap.querySelector('#lf-search-input').oninput = e => applySearch(e.target.value.toLowerCase().trim());
+    // ─────────────────────────────────────────────────────────────────
+    // §10. React Fiber → storyId 추출
+    // ─────────────────────────────────────────────────────────────────
+    function getIdFromFiber(el) {
+        const fk = el && Object.keys(el).find(k =>
+            k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+        );
+        if (!fk) return null;
+        let fiber = el[fk];
+        let depth = 0;
+        while (fiber && depth++ < 50) {
+            const p = fiber.memoizedProps;
+            if (p && typeof p === 'object') {
+                for (const k of ['storyId', 'characterId', '_id', 'sourceId', 'id', 'contentId']) {
+                    const v = p[k];
+                    if (typeof v === 'string' && /^[a-f0-9]{24}$/.test(v)) return v;
+                }
+            }
+            fiber = fiber.return;
+        }
+        return null;
     }
 
-    // ─────────────────────────────────────────────
-    // 5. UI 정리 (페이지 이동 시)
-    // ─────────────────────────────────────────────
-    function cleanupUI() {
-        // v1.2.0: titleElement를 더 이상 이동/래핑하지 않으므로 복원 로직 불필요.
-        //         형제 노드로 삽입했던 헤더만 제거하면 원본 DOM은 항상 그대로 보존됨.
-        // v1.3.1: display:none 처리한 원본 <p>를 복원.
-        document.getElementById('lf-sticky-header')?.remove();
-        const pageTitle = document.querySelector(PAGE_TITLE_SEL);
-        if (pageTitle) pageTitle.style.display = '';
+    // ─────────────────────────────────────────────────────────────────
+    // §11. 컬렉션 캐시 관리
+    // ─────────────────────────────────────────────────────────────────
+    function addToColCache(colId, colName, storyId) {
+        const key = COL_CACHE_PREFIX + colId;
+        try {
+            const raw = localStorage.getItem(key);
+            const cache = raw ? JSON.parse(raw) : { name: colName, ids: [] };
+            if (!cache.ids.includes(storyId)) {
+                cache.ids.push(storyId);
+                cache.name = colName;
+                localStorage.setItem(key, JSON.stringify(cache));
+            }
+        } catch {}
+    }
 
+    // storyId → [{ colId, name, color }] 역방향 맵 생성
+    function buildStoryToColMap() {
+        const map = new Map();
+        const layout = getLayout();
+        for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i);
+            if (!key?.startsWith(COL_CACHE_PREFIX)) continue;
+            const colId = key.slice(COL_CACHE_PREFIX.length);
+            try {
+                const cache = JSON.parse(localStorage.getItem(key));
+                const color = layout.colColors?.[colId] || null;
+                cache.ids?.forEach(sid => {
+                    if (!map.has(sid)) map.set(sid, []);
+                    map.get(sid).push({ colId, name: cache.name || '', color });
+                });
+            } catch {}
+        }
+        return map;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // §12. 태그 배지 주입
+    // ─────────────────────────────────────────────────────────────────
+    const TAG_ATTR = 'data-lf-tag-col';
+
+    function injectTagBadge(card, colId, colName, color) {
+        if (card.querySelector(`.lf-tag-badge[${TAG_ATTR}="${colId}"]`)) return;
+        const titleEl = card.querySelector(TITLE_SEL);
+        if (!titleEl) return;
+
+        let tagWrap = titleEl.nextElementSibling;
+        if (!tagWrap || !tagWrap.classList.contains('lf-tag-wrap')) {
+            tagWrap = document.createElement('div');
+            tagWrap.className = 'lf-tag-wrap';
+            titleEl.insertAdjacentElement('afterend', tagWrap);
+        }
+        const badge = document.createElement('span');
+        badge.className = 'lf-tag-badge';
+        badge.setAttribute(TAG_ATTR, colId);
+        badge.textContent = colName;
+        const c = color || '#888';
+        badge.style.cssText = `background:${c}18;color:${c};border:1px solid ${c}40;`;
+        tagWrap.appendChild(badge);
+    }
+
+    // 좋아요 페이지: 캐시 기반으로 카드에 태그 주입
+    function applyTagsToLikedCards() {
+        const grid = document.querySelector(GRID_SEL);
+        if (!grid) return;
+        const storyMap = buildStoryToColMap();
+        if (!storyMap.size) return;
+
+        grid.querySelectorAll(CARD_SEL).forEach(card => {
+            if (card.dataset.lfTagged === '1') return;
+            const storyId = getIdFromFiber(card);
+            if (!storyId) return;
+            const cols = storyMap.get(storyId);
+            if (cols?.length) {
+                cols.forEach(({ colId, name, color }) => injectTagBadge(card, colId, name, color));
+            }
+            card.dataset.lfTagged = '1';
+        });
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // §13. 컬렉션 페이지 캐싱
+    // ─────────────────────────────────────────────────────────────────
+    const COL_CARD_SEL = 'div.grid[class*="gap-y-10"] > div[role="button"]';
+    let _colPageInited = false;
+    let _colPageObserver = null;
+
+    function initCollectionPageCaching() {
+        if (_colPageInited) return;
+
+        const mp = window.location.pathname.match(/^\/collections\/([a-f0-9]{24})$/i);
+        if (!mp) return;
+        const colId = mp[1];
+
+        const scrollEl = document.getElementById(`collection-${colId}-scroll`);
+        const nameEl   = scrollEl?.querySelector('h1') ?? document.querySelector('h1');
+        if (!nameEl) return; // DOM 미준비
+
+        const colName = nameEl.textContent.trim();
+
+        // ── Fetch 인터셉터: 컬렉션 아이템 API 자동 감지 (Fiber 실패 대비) ──
+        if (!window._lfFetchPatched) {
+            window._lfFetchPatched = true;
+            const _origFetch = window.fetch;
+            window.fetch = async function (...args) {
+                const res = await _origFetch.apply(this, args);
+                const url = (typeof args[0] === 'string' ? args[0] : args[0]?.url) || '';
+                // content-collections/{id}/anything 패턴 감지
+                const fm = url.match(/content-collections\/([a-f0-9]{24})\/(\w+)/i);
+                if (fm) {
+                    try {
+                        const clone = res.clone();
+                        const json  = await clone.json();
+                        const fColId = fm[1];
+                        const fColNameEl = document.querySelector('h1');
+                        const fColName = fColNameEl?.textContent?.trim() || '';
+                        // 다양한 응답 구조 대응
+                        const arr = Array.isArray(json?.data?.items) ? json.data.items
+                            : Array.isArray(json?.data?.list)  ? json.data.list
+                            : Array.isArray(json?.data)        ? json.data
+                            : Array.isArray(json?.items)       ? json.items : [];
+                        arr.forEach(item => {
+                            const id = item._id || item.storyId || item.id || item.contentId;
+                            if (typeof id === 'string' && /^[a-f0-9]{24}$/.test(id)) {
+                                addToColCache(fColId, fColName, id);
+                            }
+                        });
+                    } catch {}
+                }
+                return res;
+            };
+        }
+
+        // ── Fiber 기반 카드 처리 ──
+        function processCard(card) {
+            if (card.dataset.lfColCached) return;
+            const storyId = getIdFromFiber(card);
+            if (!storyId) return;
+            card.dataset.lfColCached = '1';
+            addToColCache(colId, colName, storyId);
+            const color = getColColor(colId);
+            injectTagBadge(card, colId, colName, color);
+        }
+
+        document.querySelectorAll(COL_CARD_SEL).forEach(processCard);
+
+        _colPageObserver?.disconnect();
+        _colPageObserver = new MutationObserver(muts => {
+            muts.forEach(m => m.addedNodes.forEach(n => {
+                if (n.nodeType !== 1) return;
+                if (n.matches?.(COL_CARD_SEL)) processCard(n);
+                else n.querySelectorAll?.(COL_CARD_SEL).forEach(processCard);
+            }));
+        });
+        const container = scrollEl ?? document.body;
+        _colPageObserver.observe(container, { childList: true, subtree: true });
+        _colPageInited = true;
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // §8. UI 초기화 / 정리
+    // ─────────────────────────────────────────────────────────────────
+    function cleanupUI() {
+        document.getElementById('lf-col-section')?.remove();
+        document.getElementById('lf-toggle-btn')?.remove();
+        document.getElementById('lf-col-toggle-btn')?.remove();
+        document.getElementById('lf-col-modal-overlay')?.remove();
+        document.getElementById('lf-search-btn')?.remove();
+        document.getElementById('lf-search-bar')?.remove();
+
+        // 그리드 헤더 초기화 (h2 flex 복원)
         const grid = document.querySelector(GRID_SEL);
         if (grid) {
-            grid.querySelectorAll('.lf-folder-card').forEach(el => el.remove());
-            grid.querySelector('#lf-scroll-spacer')?.remove();
-            grid.querySelectorAll(CARD_SEL).forEach(card => card.style.display = '');
+            let header = grid.previousElementSibling;
+            while (header && !header.querySelector('h2')) {
+                header = header.previousElementSibling;
+            }
+            if (header) {
+                const h2 = header.querySelector('h2');
+                if (h2) h2.style.flex = '';
+            }
+        }
+
+        // 원본 캐러셀 섹션 복원
+        const carouselSection = document.querySelector(CAROUSEL_SEL)?.closest('section');
+        if (carouselSection) carouselSection.style.display = '';
+
+        if (grid) {
+            grid.style.display = '';
+            grid.querySelectorAll(CARD_SEL).forEach(c => c.style.display = '');
         }
 
         lastCardCount = 0;
+        colSectionBuilt = false;
+        _cachedCollections = [];
     }
 
-    // ─────────────────────────────────────────────
-    // 6. 감시자 (옵저버) + setInterval 안전망
-    // ─────────────────────────────────────────────
+    // ─────────────────────────────────────────────────────────────────
+    // §9. checkAndRender + MutationObserver + setInterval
+    // ─────────────────────────────────────────────────────────────────
     let lastCardCount = 0;
+    let colSectionBuilt = false;
     let debounceTimer = null;
 
     function checkAndRender() {
-        if (!window.location.pathname.includes('/liked')) {
+        if (!window.location.pathname.startsWith('/liked')) {
             cleanupUI();
             return;
         }
 
-        initUI();
+        // B: 컬렉션 그리드
+        const carousel = document.querySelector(CAROUSEL_SEL);
+        if (carousel) {
+            const cols = extractCollections();
+            if (!colSectionBuilt || cols.length !== _cachedCollections.length) {
+                renderCollectionSection();
+                colSectionBuilt = true;
+            }
+        }
 
+        // C+검색: 그리드 헤더 접기 버튼 + 탭 아래 고정 검색창
+        initGridArea();
+        initSearchBar();
+
+        // D: 캐시 기반 태그 주입
+        applyTagsToLikedCards();
+
+        // 카드 수 변화 감지 → 검색어 재적용
         const grid = document.querySelector(GRID_SEL);
         if (!grid) return;
 
-        const cards = Array.from(grid.querySelectorAll(CARD_SEL))
-            .filter(c => !c.closest('.lf-folder-card'));
+        const cardCount = grid.querySelectorAll(CARD_SEL).length;
+        if (cardCount !== lastCardCount) {
+            lastCardCount = cardCount;
+            const searchInput = document.getElementById('lf-search-input');
+            if (searchInput?.value) applySearch(searchInput.value.toLowerCase().trim());
+        }
 
-        const savedFolderCount = getFolders().length;
-        const renderedFolderCount = grid.querySelectorAll('.lf-folder-card').length;
-
-        const cardCountChanged = cards.length !== lastCardCount;
-        const foldersVanished = savedFolderCount > 0 && renderedFolderCount === 0;
-
-        if (cardCountChanged || foldersVanished) {
-            lastCardCount = cards.length;
-            renderAll();
+        // 접기 상태 재적용 (reconciliation 리셋 방어)
+        if (getGridCollapsed() && grid.style.display !== 'none') {
+            grid.style.display = 'none';
+        }
+        const colSection = document.getElementById('lf-col-section');
+        if (colSection && getColCollapsed()) {
+            const rowsWrap = colSection.querySelector('.lf-col-rows');
+            if (rowsWrap && rowsWrap.style.display !== 'none') {
+                rowsWrap.style.display = 'none';
+            }
         }
     }
 
-    const observer = new MutationObserver(() => {
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(checkAndRender, 150);
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
+    // ─────────────────────────────────────────────────────────────────
+    // 메인 루프 — SPA URL 변경을 매 tick에서 감지하여 분기
+    // ─────────────────────────────────────────────────────────────────
+    const COL_PAGE_RE = /^\/collections\/([a-f0-9]{24})$/i;
 
-    setInterval(checkAndRender, 1500);
+    function mainLoop() {
+        const path = window.location.pathname;
+
+        if (COL_PAGE_RE.test(path)) {
+            // 컬렉션 내부 페이지 (직접 접근 또는 SPA 네비게이션 모두 처리)
+            initCollectionPageCaching();
+        } else {
+            // 컬렉션 페이지에서 벗어난 경우 → 상태 리셋 (재진입 대비)
+            if (_colPageInited) {
+                _colPageObserver?.disconnect();
+                _colPageObserver = null;
+                _colPageInited = false;
+                window._lfFetchPatched = false;
+            }
+            if (path.startsWith('/liked')) {
+                checkAndRender();
+            } else {
+                cleanupUI();
+            }
+        }
+    }
+
+    const _mainObserver = new MutationObserver(() => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(mainLoop, 150);
+    });
+    _mainObserver.observe(document.body, { childList: true, subtree: true });
+    setInterval(mainLoop, 1500);
 
 })();
