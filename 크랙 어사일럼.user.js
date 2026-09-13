@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 어사일럼
 // @namespace    http://tampermonkey.net/
-// @version      1.2.7
+// @version      1.2.8
 // @description  세션 이주 자동화 – 채팅 로그 수집 → Gemini 요약 생성 → 신규 세션 이주
 // @match        https://crack.wrtn.ai/stories/*
 // @grant        GM_setValue
@@ -27,7 +27,7 @@
   const MB_ATTR        = 'data-crk-mb-injected';
   const CHAR_LIMIT     = 300;
   const REGEN_TAB_ATTR = 'data-crk-regen-tab';
-  const REGEN_TAB_VER  = 'v2'; // 버전 변경 시 구 주입 요소 자동 제거
+  const REGEN_TAB_VER  = 'v3'; // 버전 변경 시 구 주입 요소 자동 제거
   const REGEN_PANEL_ID = 'crk-regen-panel';
   const REGEN_ACTIVE   = 'data-crk-regen-active';
 
@@ -898,7 +898,7 @@
     const mdlField = mkField(p, 'Gemini 모델');
     const mdlSel   = el('select', { className: 'crk-ch-sel' });
     ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-pro',
-     'gemini-3-flash-preview', 'gemini-3.1-pro-preview', 'gemini-3.5-flash', 'gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-3.8-flash']
+     'gemini-3-flash-preview', 'gemini-3.1-pro-preview', 'gemini-3.5-flash']
       .forEach(m => {
         const opt = new Option(m, m);
         if (m === cfg.model()) opt.selected = true;
@@ -1419,9 +1419,10 @@
 
     const h2 = dialog.querySelector('h2');
     if (!h2) return;
-    const h2Wrap = h2.parentElement; // div.flex.justify-between.w-full
+    const h2Wrap = h2.parentElement; // 신 구조: div.flex.min-w-0.flex-1.flex-col.gap-1.5
 
-    // justify-between → flex-start 로 변경하여 h2+버튼이 왼쪽으로 모이게
+    // [Fix v1.2.8] 플랫폼이 h2Wrap을 flex-col로 변경 → row 강제로 h2·|·버튼 가로 배치
+    h2Wrap.style.flexDirection  = 'row';
     h2Wrap.style.justifyContent = 'flex-start';
     h2Wrap.style.alignItems     = 'center';
     // 닫기 버튼(X)이 있으면 margin-left:auto 로 오른쪽 끝으로 밀기
