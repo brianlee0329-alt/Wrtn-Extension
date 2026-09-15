@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 어사일럼
 // @namespace    http://tampermonkey.net/
-// @version      1.2.8
+// @version      1.2.9
 // @description  세션 이주 자동화 – 채팅 로그 수집 → Gemini 요약 생성 → 신규 세션 이주
 // @match        https://crack.wrtn.ai/stories/*
 // @grant        GM_setValue
@@ -26,6 +26,7 @@
   const MB_LOAD  = 'crk-mb-load';
   const MB_ATTR        = 'data-crk-mb-injected';
   const CHAR_LIMIT     = 300;
+  const TITLE_LIMIT    = 20;          // 플랫폼 메모리 제목 최대 글자 수
   const REGEN_TAB_ATTR = 'data-crk-regen-tab';
   const REGEN_TAB_VER  = 'v3'; // 버전 변경 시 구 주입 요소 자동 제거
   const REGEN_PANEL_ID = 'crk-regen-panel';
@@ -621,7 +622,7 @@
     const fileField = mkField(p, null);
     fileField.style.display = 'none';
     const fileRow     = el('div', { style: 'display:flex;align-items:center;gap:8px;flex-wrap:wrap;' });
-    const fileInput   = el('input', { type: 'file', accept: '.txt,.json', style: 'display:none;' });
+    const fileInput   = el('input', { type: 'file', accept: '.txt,.json', multiple: true, style: 'display:none;' });
     const filePickBtn = mkBtn('📂 파일 선택', 'gr');
     const fileNameLbl = el('span', { style: 'font-size:12px;color:#6b7280;', textContent: '선택된 파일 없음' });
     fileRow.append(filePickBtn, fileNameLbl, fileInput);
@@ -632,7 +633,10 @@
     }));
     filePickBtn.addEventListener('click', () => fileInput.click());
     fileInput.addEventListener('change', () => {
-      fileNameLbl.textContent = fileInput.files?.[0]?.name ?? '선택된 파일 없음';
+      const n = fileInput.files?.length ?? 0;
+      fileNameLbl.textContent = n === 0 ? '선택된 파일 없음'
+        : n === 1 ? fileInput.files[0].name
+        : `${n}개 파일 선택됨`;
     });
 
     // 실행 버튼
@@ -674,15 +678,20 @@
 
         if (rFile.checked) {
           // ── 파일 소스 ──
-          if (!fileInput.files?.[0]) throw new Error('파일을 먼저 선택해주세요.');
+          if (!fileInput.files?.length) throw new Error('파일을 먼저 선택해주세요.');
           status.show('파일 파싱 중…', 'info');
-          const rawText = await fileInput.files[0].text();
-          msgs = fileInput.files[0].name.toLowerCase().endsWith('.json')
-            ? parseLogJson(rawText)
-            : parseLogTxt(rawText);
+          const allMsgs = [];
+          for (const f of Array.from(fileInput.files)) {
+            const rawText = await f.text();
+            const parsed  = f.name.toLowerCase().endsWith('.json')
+              ? parseLogJson(rawText) : parseLogTxt(rawText);
+            allMsgs.push(...parsed);
+          }
+          msgs = allMsgs;
           if (!msgs.length)
             throw new Error('파일에서 메시지를 찾을 수 없습니다. TXT / JSON 형식을 확인해주세요.');
-          status.show(`📄 파일에서 ${msgs.length}개 메시지 로드됨`, 'info');
+          const fc = fileInput.files.length;
+          status.show(`📄 ${fc > 1 ? `${fc}개 파일에서 ` : '파일에서 '}${msgs.length}개 메시지 로드됨`, 'info');
         } else {
           // ── 현재 세션 소스 ──
           msgs = await fetchAllMessages(ids.chatId, s => status.show(s, 'info'));
@@ -898,7 +907,8 @@
     const mdlField = mkField(p, 'Gemini 모델');
     const mdlSel   = el('select', { className: 'crk-ch-sel' });
     ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-pro',
-     'gemini-3-flash-preview', 'gemini-3.1-pro-preview', 'gemini-3.5-flash']
+     'gemini-3-flash-preview', 'gemini-3.1-pro-preview', 'gemini-3.5-flash',
+     'gemini-3.6-flash', 'gemini-3.7-flash', 'gemini-3.8-flash']
       .forEach(m => {
         const opt = new Option(m, m);
         if (m === cfg.model()) opt.selected = true;
@@ -1568,7 +1578,7 @@
       regenSaveEdits();
       const slots = getRegenSlots();
       if (!slots.length) { toast('이식할 슬롯이 없습니다.', 'warn'); return; }
-      const valid = slots.filter(s => s.content.length <= CHAR_LIMIT);
+      const valid = slots.filter(s => s.content.length <= CHAR_LIMIT && s.title.length <= TITLE_LIMIT);
       const over  = slots.length - valid.length;
       const raw   = localStorage.getItem(MEMORY_STORAGE);
       const data  = raw ? JSON.parse(raw) : {};
@@ -1607,16 +1617,16 @@
       return;
     }
 
-    const over = slots.filter(s => s.content.length > CHAR_LIMIT).length;
+    const over = slots.filter(s => s.content.length > CHAR_LIMIT || s.title.length > TITLE_LIMIT).length;
     const sum  = document.createElement('div');
     sum.style.cssText = `font-size:11px;margin-bottom:8px;color:${over ? '#d97706' : '#6b7280'};`;
     sum.textContent   = over
-      ? `전체 ${slots.length}개 | ⚠️ ${over}개 ${CHAR_LIMIT}자 초과`
-      : `전체 ${slots.length}개 (모두 ${CHAR_LIMIT}자 이내 ✅)`;
+      ? `전체 ${slots.length}개 | ⚠️ ${over}개 제한 초과 (내용 ${CHAR_LIMIT}자 / 제목 ${TITLE_LIMIT}자)`
+      : `전체 ${slots.length}개 (내용·제목 모두 이내 ✅)`;
     list.appendChild(sum);
 
     slots.forEach((slot, idx) => {
-      const isOver = slot.content.length > CHAR_LIMIT;
+      const isOver = slot.content.length > CHAR_LIMIT || slot.title.length > TITLE_LIMIT;
       const item   = document.createElement('div');
       item.dataset.index = String(idx);
       item.style.cssText =
@@ -1632,17 +1642,37 @@
       titleInput.value = slot.title;
       titleInput.dataset.field = 'title';
       titleInput.style.cssText =
-        'flex:1;border:none;background:transparent;font-size:12px;font-weight:600;outline:none;min-width:0;';
+        'flex:1;border:none;background:transparent;font-size:12px;font-weight:600;' +
+        'outline:none;min-width:0;border-radius:3px;padding:1px 3px;';
+      titleInput.addEventListener('focus', () => { titleInput.style.outline = '1px solid #d1d5db'; });
+      titleInput.addEventListener('blur',  () => { titleInput.style.outline = 'none'; });
+
+      let _contentLen = slot.content.length; // setBadge ↔ updateTitleCount 공유
+
+      // 제목 글자수 카운터 (TITLE_LIMIT 초과 시 적색)
+      const titleCount = document.createElement('span');
+      titleCount.style.cssText = 'font-size:10px;flex-shrink:0;';
+      const updateTitleCount = () => {
+        const len = titleInput.value.length;
+        const ov  = len > TITLE_LIMIT;
+        titleCount.textContent = `${len}/${TITLE_LIMIT}`;
+        titleCount.style.color = ov ? '#ef4444' : '#9ca3af';
+        item.style.borderColor = (ov || _contentLen > CHAR_LIMIT) ? '#f59e0b' : '#e5e7eb';
+      };
+      updateTitleCount();
+      titleInput.addEventListener('input', updateTitleCount);
 
       const badge = document.createElement('span');
       badge.style.cssText =
         'font-size:10px;font-weight:700;padding:1px 5px;border-radius:8px;white-space:nowrap;flex-shrink:0;';
       const setBadge = (len) => {
-        const ov = len > CHAR_LIMIT;
-        badge.textContent      = `${ov ? '⚠️ ' : ''}${len}자`;
-        badge.style.background = ov ? '#fef3c7' : '#f0fdf4';
-        badge.style.color      = ov ? '#b45309' : '#16a34a';
-        item.style.borderColor = ov ? '#f59e0b' : '#e5e7eb';
+        _contentLen = len;
+        const contentOv = len > CHAR_LIMIT;
+        const titleOv   = titleInput.value.length > TITLE_LIMIT;
+        badge.textContent      = `${contentOv ? '⚠️ ' : ''}${len}자`;
+        badge.style.background = contentOv ? '#fef3c7' : '#f0fdf4';
+        badge.style.color      = contentOv ? '#b45309' : '#16a34a';
+        item.style.borderColor = (contentOv || titleOv) ? '#f59e0b' : '#e5e7eb';
       };
       setBadge(slot.content.length);
 
@@ -1666,7 +1696,7 @@
         regenSyncTabLabel(regenGetTabBtn(getMemoryDialog()));
       });
 
-      hdr.append(titleInput, badge, delBtn);
+      hdr.append(titleInput, titleCount, badge, delBtn);
 
       // ── 내용 텍스트에어리어 ──
       const ta = document.createElement('textarea');
