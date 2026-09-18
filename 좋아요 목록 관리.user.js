@@ -247,6 +247,12 @@
             font-size: 10px; padding: 1px 6px; border-radius: 9px;
             white-space: nowrap; line-height: 1.6;
         }
+        .lf-tag-del {
+            background: none; border: none; padding: 0 0 0 3px;
+            cursor: pointer; color: inherit; opacity: 0.6;
+            font-size: 12px; line-height: 1; flex-shrink: 0;
+        }
+        .lf-tag-del:hover { opacity: 1; }
 
         .lf-empty-hint {
             color: #aaa; font-size: 12px; padding: 10px; text-align: center;
@@ -914,9 +920,33 @@
         const badge = document.createElement('span');
         badge.className = 'lf-tag-badge';
         badge.setAttribute(TAG_ATTR, colId);
-        badge.textContent = colName;
         const c = color || '#888';
         badge.style.cssText = `background:${c}18;color:${c};border:1px solid ${c}40;`;
+
+        const label = document.createElement('span');
+        label.textContent = colName;
+        badge.appendChild(label);
+
+        const xBtn = document.createElement('button');
+        xBtn.className = 'lf-tag-del';
+        xBtn.textContent = '×';
+        xBtn.title = '태그 삭제';
+        xBtn.onclick = e => {
+            e.stopPropagation();
+            const storyId = getIdFromFiber(card);
+            if (storyId) {
+                try {
+                    const key = COL_CACHE_PREFIX + colId;
+                    const cache = JSON.parse(localStorage.getItem(key) || '{"ids":[]}');
+                    cache.ids = cache.ids.filter(id => id !== storyId);
+                    localStorage.setItem(key, JSON.stringify(cache));
+                } catch {}
+            }
+            delete card.dataset.lfTagged;
+            badge.remove();
+            if (tagWrap.children.length === 0) tagWrap.remove();
+        };
+        badge.appendChild(xBtn);
         tagWrap.appendChild(badge);
     }
 
@@ -1078,6 +1108,11 @@
                 colSectionBuilt = true;
             }
         }
+        // 원본 캐러셀 숨김 재보장 (SPA 복귀 시 reconciliation 리셋 방어)
+        if (colSectionBuilt) {
+            const cs = document.querySelector(CAROUSEL_SEL)?.closest('section');
+            if (cs && cs.style.display !== 'none') cs.style.display = 'none';
+        }
 
         // C+검색: 그리드 헤더 접기 버튼 + 탭 아래 고정 검색창
         initGridArea();
@@ -1128,6 +1163,7 @@
                 _colPageObserver = null;
                 _colPageInited = false;
                 window._lfFetchPatched = false;
+                colSectionBuilt = false; // 복귀 시 컬렉션 UI 강제 재렌더
             }
             if (path.startsWith('/liked')) {
                 checkAndRender();
