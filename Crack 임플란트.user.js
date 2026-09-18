@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Crack 임플란트
 // @namespace    https://crack.wrtn.ai
-// @version      2.1.3
-// @description  카드 이미지에 0.8초 호버 → 말풍선 / 메인 페이지 모달 억제 / 나만의 태그 (말풍선·모달·작품페이지)
+// @version      2.2.4
+// @description  카드 이미지에 0.8초 호버 → 말풍선 / 메인 페이지 모달 억제 / 나만의 태그 (말풍선·모달·작품페이지·프로필탭)
 // @match        https://crack.wrtn.ai/*
 // @grant        none
 // @run-at       document-start
@@ -420,15 +420,17 @@
         setTimeout(_injectMyTagsInDetailPage, 400);
         setTimeout(_injectMyTagsInDetailPage, 900);
       }
-      // 좋아요 페이지 진입: 탭 초기화
-      if (_isLikedPage()) {
-        setTimeout(_initLikedTabs, 500);
-        setTimeout(_initLikedTabs, 1200);
+      // 프로필 페이지 진입: 탭 초기화
+      if (_isProfilePage()) {
+        // _isOwnProfile()은 setTimeout 안에서 확인 (DOM / __NEXT_DATA__ 준비 대기)
+        setTimeout(_initProfileTabs, 500);
+        setTimeout(_initProfileTabs, 1200);
       } else {
-        // 좋아요 페이지에서 이탈 시: 탭 상태 리셋
-        // (DOM은 SPA가 교체하므로 플래그와 activeTab만 리셋)
-        _likedTabsInited = false;
-        _likedActiveTab  = 'story';
+        _profTabsInited      = false;
+        _profActiveTab       = 'work';
+        _profFilterTag       = 'all';
+        _profPlatformTablist = null;
+        _profContentEl       = null;
       }
     };
 
@@ -576,16 +578,10 @@
   }
 
   /* ══════════════════════════════════════════════════════════════
-     § 6.8  좋아요 페이지 나만의 태그 탭
-     ─ /liked 페이지 전용
-     ─ 플랫폼의 [스토리 | 캐릭터] 탭바를 가로챠 [스토리 | 캐릭터 | 나만의 태그]로 확장
-     ─ 스토리/캐릭터: 플랫폼 원본 탭 대리클릭으로 React 상태 유지
-     ─ 나만의 태그: crk-card::* 스냅샷 기반 자체 카드 그리드 렌더
-     ─ 카드 스냅샷 저장소: localStorage crk-card::{id} → {title,creator,chatCount,thumbUrl}
+     § 6.8  나만의 태그 공유 유틸
+     ─ §6.7 (detail 주입) / §6.9 (프로필 탭) 에서 공통으로 사용
+     ─ 좋아요 페이지 전용 코드는 v2.2.1에서 제거됨 (해당 페이지 UI 개편)
      ══════════════════════════════════════════════════════════════ */
-  function _isLikedPage() {
-    return /^\/liked/.test(location.pathname);
-  }
 
   const CARD_LS_PREFIX = 'crk-card::';
 
@@ -654,22 +650,8 @@
     return map;
   }
 
-  /* ── 탭 상태 관리 ──────────────────────────────────────────── */
-  // 현재 활성 탭: 'story' | 'character' | 'mytag'
-  let _likedActiveTab = 'story';
 
-  /* 태그(카테고리)별 펼침 상태 저장 키 */
-  const MYTAG_EXPAND_LS_KEY = 'crk-mytag-expanded';
 
-  function _loadExpandedTags() {
-    try {
-      const raw = localStorage.getItem(MYTAG_EXPAND_LS_KEY);
-      return raw ? new Set(JSON.parse(raw)) : new Set();
-    } catch(_) { return new Set(); }
-  }
-  function _saveExpandedTags(set) {
-    try { localStorage.setItem(MYTAG_EXPAND_LS_KEY, JSON.stringify([...set])); } catch(_) {}
-  }
 
   /* 카드 한 장의 HTML — 좋아요_목록_관리와 무관하게 항상
      이미지 164.8×247.19px / 정보 영역 164.8×88.22px 고정 치수로 렌더 */
@@ -696,261 +678,295 @@
     return h;
   }
 
-  /* 나만의 태그 탭 패널 렌더링 — 태그별 접기/펼치기 카테고리 섹션 */
-  function _renderMyTagPanel(panel) {
-    const allTags  = _collectAllTags();
-    const tagNames = Object.keys(allTags).sort();
 
-    if (tagNames.length === 0) {
-      panel.innerHTML = `<p class="crk-lt-empty">태그를 붙인 작품이 없어요.<br>작품 카드에 호버해서 태그를 추가해보세요!</p>`;
-      return;
-    }
+  /* ══════════════════════════════════════════════════════════════
+     § 6.9  프로필 페이지 나만의 태그 탭
+     ─ /profile/{userId} (개인 프로필 한정)
+     ─ 플랫폼의 [작품 | 시리즈 | 피드] 탭바를 가로채
+       [작품 | 시리즈 | 피드 | 나만의 태그]로 확장
+     ─ 작품/시리즈/피드: 원본 Radix 탭 대리클릭으로 React state 유지
+     ─ 나만의 태그: crk-card::* 스냅샷 기반 카드 그리드
+     ─ 상단 필터 버튼: 선택한 태그 카테고리만 표시 (나머지 숨김)
+     ══════════════════════════════════════════════════════════════ */
 
-    const expanded = _loadExpandedTags();
-    // 첫 진입 시(저장된 펼침 상태가 전혀 없을 때) 첫 번째 카테고리만 기본 펼침
-    if (expanded.size === 0) expanded.add(tagNames[0]);
-
-    let h = `<div class="crk-lt-categories" id="crk-lt-categories">`;
-    tagNames.forEach(tag => {
-      const works  = allTags[tag];
-      const isOpen = expanded.has(tag);
-      h += `<div class="crk-lt-cat" data-tag="${_esc(tag)}">`;
-      h += `  <button class="crk-lt-cat-header" data-tag="${_esc(tag)}" aria-expanded="${isOpen}">`;
-      h += `    <svg class="crk-lt-cat-chevron${isOpen ? ' crk-lt-cat-chevron-open' : ''}" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8.59 16.59 13.17 12 8.59 7.41 10 6l6 6-6 6z"/></svg>`;
-      h += `    <span class="crk-lt-cat-name">${_esc(tag)}</span>`;
-      h += `    <span class="crk-lt-cat-count">${works.length}</span>`;
-      h += `  </button>`;
-      h += `  <div class="crk-lt-cat-body" style="display:${isOpen ? '' : 'none'}">`;
-      h += `    <div class="crk-lt-grid" data-tag-grid="${_esc(tag)}">`;
-      works.forEach(({ id }) => {
-        h += _buildMyTagCardHTML(id, _loadCardSnapshot(id));
-      });
-      h += `    </div>`;
-      h += `  </div>`;
-      h += `</div>`;
-    });
-    h += `</div>`; // .crk-lt-categories
-    panel.innerHTML = h;
-
-    // 카테고리 헤더 클릭 → 접기/펼치기
-    panel.querySelector('#crk-lt-categories').addEventListener('click', e => {
-      const header = e.target.closest('.crk-lt-cat-header');
-      if (header) {
-        const tag  = header.dataset.tag;
-        const body = header.nextElementSibling;
-        const cur  = _loadExpandedTags();
-        const willOpen = !cur.has(tag);
-        if (willOpen) cur.add(tag); else cur.delete(tag);
-        _saveExpandedTags(cur);
-        header.setAttribute('aria-expanded', String(willOpen));
-        header.querySelector('.crk-lt-cat-chevron')
-          ?.classList.toggle('crk-lt-cat-chevron-open', willOpen);
-        body.style.display = willOpen ? '' : 'none';
-        return;
-      }
-
-      // 카드 클릭 처리
-      const card = e.target.closest('.crk-lt-card');
-      if (!card) return;
-      const id = card.dataset.crkId;
-      if (!id) return;
-
-      if (card.classList.contains('crk-lt-card-noimg')) {
-        // 썸네일 미수집 카드: history.pushState는 Next.js 라우터를 깨우지 못함 →
-        // window.open으로 새탭에서 열어 좋아요 페이지를 유지하면서 작품 확인 가능
-        window.open(`/detail/${id}`, '_blank', 'noopener');
-        return;
-      }
-
-      // 썸네일 있는 카드: 플랫폼 원본 카드 찾아 대리클릭
-      const platformCards = document.querySelectorAll('[data-crk-peek="1"]');
-      for (const pc of platformCards) {
-        const pcId = _getIdFromFiber(pc);
-        if (pcId === id) { pc.click(); return; }
-      }
-      // 플랫폼 카드 없으면(무한스크롤 미로드) 새탭 fallback
-      window.open(`/detail/${id}`, '_blank', 'noopener');
-    });
-
-    // 카드 키보드 접근성
-    panel.querySelector('#crk-lt-categories').addEventListener('keydown', e => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        const card = e.target.closest('.crk-lt-card');
-        if (card) { e.preventDefault(); card.click(); }
-      }
-    });
+  /* ── 페이지 판별 ──────────────────────────────────────────── */
+  function _isProfilePage() {
+    // /profile/{userId} 형식만 허용
+    // /profile/assignment, /profile/{id}/follow 등은 제외
+    const parts = location.pathname.split('/').filter(Boolean);
+    return parts.length === 2 && parts[0] === 'profile' && parts[1] !== 'assignment';
   }
 
-  /* ── 좋아요_목록_관리 renderAll 트리거 ──────────────────────
-     좋아요_목록_관리는 MutationObserver(150ms debounce)로 자동 실행되나
-     명시적으로 강제 트리거가 필요한 경우(나만의 태그→스토리 복원 등)에
-     lf-folder-card를 일시 제거해 foldersVanished 조건을 만족시킨다.
-  ──────────────────────────────────────────────────────────── */
-  function _triggerCompanionRender() {
-    const grid = document.querySelector('#liked-scroll div[class*="grid-cols-3"]');
-    if (!grid) return;
-    // foldersVanished 조건(savedFolderCount > 0 && renderedFolderCount === 0) 유발
-    const folders = [...grid.querySelectorAll('.lf-folder-card')];
-    folders.forEach(f => f.remove());
-    // MutationObserver가 변화를 감지해 renderAll() 재실행
+  /* ── 개인 프로필 여부 판별 ────────────────────────────────── */
+  // 1순위: __NEXT_DATA__에서 로그인 uid vs URL의 userId 비교
+  // fallback: DOM에서 "수정" 버튼 존재 여부
+  function _isOwnProfile() {
+    try {
+      const pp    = window.__NEXT_DATA__?.props?.pageProps;
+      const myUid = pp?.fallback?.['/user']?.wrtnUid;
+      const parts = location.pathname.split('/').filter(Boolean);
+      const urlId = parts[1];
+      if (myUid && urlId) return myUid === urlId;
+    } catch (_) {}
+    // DOM fallback: React 렌더 완료 후에만 유효
+    return [...(document.querySelectorAll?.('button') ?? [])].some(
+      b => b.textContent?.trim() === '수정'
+    );
   }
 
-  /* 탭 전환 핵심 로직 */
-  function _switchLikedTab(tabName) {
-    _likedActiveTab = tabName;
+  /* ── 탭 상태 ──────────────────────────────────────────────── */
+  let _profTabsInited     = false;
+  let _profActiveTab      = 'work';   // 'work' | 'series' | 'feed' | 'mytag'
+  let _profFilterTag      = 'all';    // 'all' | '#태그명'
+  // 초기화 시 캐시 — querySelector가 #crk-prof-tabs를 먼저 잡는 충돌 방지
+  let _profPlatformTablist = null;    // 원본 Radix tablist
+  let _profContentEl       = null;    // 플랫폼 콘텐츠 컨테이너 (숨김/복원 대상)
 
-    // 우리 탭바 버튼 상태 갱신
-    document.querySelectorAll('#crk-liked-tabs .crk-lt-tab').forEach(btn => {
-      const active = btn.dataset.tab === tabName;
-      btn.classList.toggle('crk-lt-tab-active', active);
-      btn.setAttribute('aria-selected', active ? 'true' : 'false');
-    });
+  /* ── 탭바 초기화 ──────────────────────────────────────────── */
+  function _initProfileTabs() {
+    if (!_isProfilePage() || !_isOwnProfile()) return;
 
-    const panel = document.getElementById('crk-lt-mytag-panel');
-
-    if (tabName === 'mytag') {
-      // 플랫폼 카드 래퍼 숨김
-      // 좋아요_목록_관리가 삽입한 flex.flex-col.gap-10 래퍼를 숨긴다
-      const lfWrap = document.querySelector(
-        '#liked-scroll .flex.flex-col.gap-10, #liked-scroll [class*="css-1f2qzn3"]'
-      );
-      if (lfWrap) {
-        lfWrap.dataset.crkHidden = '1';
-        lfWrap.style.setProperty('display', 'none', 'important');
-      }
-      if (panel) {
-        panel.style.display = '';
-        _renderMyTagPanel(panel);
-      }
-
-    } else {
-      // 나만의 태그 패널 숨김
-      if (panel) panel.style.display = 'none';
-
-      // 이전에 숨겼던 래퍼 복원
-      document.querySelectorAll('[data-crk-hidden="1"]').forEach(el => {
-        el.style.removeProperty('display');
-        delete el.dataset.crkHidden;
-      });
-
-      // 플랫폼 React 탭 전환 (캐릭터 카드는 React가 마운트해야 DOM에 생김)
-      const platformTablist = document.querySelector(
-        '[role="tablist"][aria-hidden="true"], [role="tablist"][style*="display: none"]'
-      );
-      const platformTabs = platformTablist
-        ? platformTablist.querySelectorAll('[role="tab"]')
-        : document.querySelectorAll('[role="tablist"]:not(#crk-liked-tabs) [role="tab"]');
-
-      const targetIdx  = tabName === 'story' ? 0 : 1;
-      const targetTab  = platformTabs[targetIdx];
-      const needsClick = targetTab && targetTab.getAttribute('data-state') !== 'active';
-
-      if (needsClick) {
-        // display:none 상태이므로 잠깐 visibility 복원 (레이아웃 측정 가능하게)
-        const tl = targetTab.closest('[role="tablist"]');
-        if (tl) {
-          tl.style.removeProperty('display');
-          tl.style.removeProperty('visibility');
-        }
-
-        // ★ 핵심: Radix UI Tabs는 onClick이 아닌 onMouseDown(실제로는
-        // onPointerDown)으로 탭을 활성화한다 (radix-ui/primitives#1879).
-        // .click()이나 dispatchEvent(MouseEvent('click'))은 Radix가
-        // 전혀 리스닝하지 않는 이벤트라 React state가 절대 바뀌지 않는다.
-        // pointerdown → mousedown → mouseup → click 순서로 실제 브라우저가
-        // 발생시키는 이벤트 체인을 그대로 재현해야 한다.
-        const rect = targetTab.getBoundingClientRect();
-        const cx = rect.left + rect.width / 2;
-        const cy = rect.top + rect.height / 2;
-        const evtOpts = {
-          bubbles: true, cancelable: true, composed: true,
-          clientX: cx, clientY: cy, button: 0,
-        };
-        targetTab.dispatchEvent(new PointerEvent('pointerdown', { ...evtOpts, pointerId: 1, pointerType: 'mouse' }));
-        targetTab.dispatchEvent(new MouseEvent('mousedown', evtOpts));
-        targetTab.dispatchEvent(new PointerEvent('pointerup',   { ...evtOpts, pointerId: 1, pointerType: 'mouse' }));
-        targetTab.dispatchEvent(new MouseEvent('mouseup',   evtOpts));
-        targetTab.dispatchEvent(new MouseEvent('click',     evtOpts));
-
-        // 클릭 후 React 렌더 대기(캐릭터 카드 마운트) → 다시 숨김
-        // rAF 한 번은 페인트 직전 시점이라 React commit이 끝나지 않을 수 있어
-        // 두 번 중첩해 다음 페인트 이후까지 확실히 대기
-        requestAnimationFrame(() => {
-          requestAnimationFrame(() => {
-            if (tl) tl.style.setProperty('display', 'none', 'important');
-          });
-        });
-      }
-
-      if (!needsClick) {
-        // 이미 해당 탭이 active 상태 (예: 나만의 태그에서 복귀했는데 플랫폼 탭은 안 변함)
-        // 좋아요_목록_관리 폴더 UI가 사라졌을 수 있으므로 재빌드 트리거
-        _triggerCompanionRender();
-      }
-    }
-  }
-
-  /* 좋아요 페이지 탭바 초기화 */
-  let _likedTabsInited = false;
-
-  function _initLikedTabs() {
-    if (!_isLikedPage()) return;
-
-    // 탭바 앵커: [role="tablist"]
-    // #liked-scroll 범위로 한정 — 새로고침 직후 하이드레이션 초기 시점에
-    // 페이지 다른 영역(헤더 네비게이션 등)의 무관한 tablist를 잘못 잡아
-    // 엉뚱한 위치에 탭바가 삽입되는 경우를 방지
-    const platformTablist = document.querySelector('#liked-scroll [role="tablist"]');
+    // 원본 tablist 식별: data-orientation="horizontal" 속성으로 우리 tablist와 구분
+    // (우리 #crk-prof-tabs에는 이 속성이 없으므로 충돌 없음)
+    const platformTablist = document.querySelector(
+      '#user-profile-scroll [role="tablist"][data-orientation="horizontal"]'
+    );
     if (!platformTablist) return;
 
-    // 이미 주입됐으면 갱신 스킵 (DOM 확인)
-    if (document.getElementById('crk-liked-tabs')) {
-      _likedTabsInited = true;
+    // 이미 주입됐으면 스킵
+    if (document.getElementById('crk-prof-tabs')) {
+      _profTabsInited = true;
       return;
     }
 
-    // 플랫폼 원본 탭바: 이제 대리클릭 불필요 (카드 타입 필터링 방식으로 전환)
-    // 시각적으로만 숨김 (스크린리더 제외)
+    // 콘텐츠 컨테이너: 패널 삽입 전에 캐시 (stickyEl.nextElementSibling)
+    const stickyEl = platformTablist.closest('[class*="sticky"]');
+    _profContentEl = stickyEl?.nextElementSibling ?? null;
+
+    // 원본 tablist 캐시
+    _profPlatformTablist = platformTablist;
+
+    // 원본 탭바 시각적으로 숨김 (React 대리클릭용으로 DOM은 유지)
     platformTablist.style.setProperty('display', 'none', 'important');
     platformTablist.setAttribute('aria-hidden', 'true');
 
     // 우리 탭바 생성
     const tabbar = document.createElement('div');
-    tabbar.id = 'crk-liked-tabs';
+    tabbar.id = 'crk-prof-tabs';
     tabbar.setAttribute('role', 'tablist');
     tabbar.innerHTML = `
-      <button class="crk-lt-tab crk-lt-tab-active" data-tab="story"     role="tab" aria-selected="true"  tabindex="0">스토리</button>
-      <button class="crk-lt-tab"                    data-tab="character" role="tab" aria-selected="false" tabindex="-1">캐릭터</button>
-      <button class="crk-lt-tab"                    data-tab="mytag"     role="tab" aria-selected="false" tabindex="-1">나만의 태그</button>
+      <button class="crk-pt-tab crk-pt-tab-active" data-tab="work"   role="tab" aria-selected="true"  tabindex="0">작품</button>
+      <button class="crk-pt-tab"                    data-tab="series" role="tab" aria-selected="false" tabindex="-1">시리즈</button>
+      <button class="crk-pt-tab"                    data-tab="feed"   role="tab" aria-selected="false" tabindex="-1">피드</button>
+      <button class="crk-pt-tab"                    data-tab="mytag"  role="tab" aria-selected="false" tabindex="-1">나만의 태그</button>
     `;
-
-    // 탭 클릭 이벤트
     tabbar.addEventListener('click', e => {
-      const btn = e.target.closest('.crk-lt-tab');
-      if (!btn) return;
-      _switchLikedTab(btn.dataset.tab);
+      const btn = e.target.closest('.crk-pt-tab');
+      if (btn) _switchProfileTab(btn.dataset.tab);
     });
 
     // 나만의 태그 패널 생성 (초기 숨김)
     const panel = document.createElement('div');
-    panel.id = 'crk-lt-mytag-panel';
+    panel.id = 'crk-prof-mytag-panel';
     panel.style.display = 'none';
 
-    // 삽입 위치: 플랫폼 탭바 바로 앞
-    platformTablist.parentNode.insertBefore(tabbar,  platformTablist);
-    platformTablist.parentNode.insertBefore(panel, platformTablist.nextSibling);
+    // 탭바: platformTablist 바로 앞 삽입
+    platformTablist.parentNode.insertBefore(tabbar, platformTablist);
 
-    // 현재 활성 탭 상태 반영
-    _switchLikedTab(_likedActiveTab);
-    _likedTabsInited = true;
+    // 패널: 콘텐츠 컨테이너 바로 앞 삽입
+    if (_profContentEl && stickyEl) {
+      stickyEl.parentNode.insertBefore(panel, _profContentEl);
+    } else {
+      platformTablist.parentNode.appendChild(panel);
+    }
+
+    _switchProfileTab(_profActiveTab);
+    _profTabsInited = true;
   }
 
-  // 좋아요 페이지 초기 진입
-  // 새로고침 직후 React 하이드레이션이 느린 경우를 대비해 호출 시점을 추가
-  if (_isLikedPage()) {
-    setTimeout(_initLikedTabs,  600);
-    setTimeout(_initLikedTabs, 1400);
-    setTimeout(_initLikedTabs, 2500);
+  /* ── 탭 전환 핵심 로직 ───────────────────────────────────── */
+  function _switchProfileTab(tabName) {
+    _profActiveTab = tabName;
+
+    // 탭 버튼 상태 갱신
+    document.querySelectorAll('#crk-prof-tabs .crk-pt-tab').forEach(btn => {
+      const active = btn.dataset.tab === tabName;
+      btn.classList.toggle('crk-pt-tab-active', active);
+      btn.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+
+    const panel = document.getElementById('crk-prof-mytag-panel');
+
+    if (tabName === 'mytag') {
+      _hideProfContent();
+      if (panel) { panel.style.display = ''; _renderProfileMyTagPanel(panel); }
+    } else {
+      if (panel) panel.style.display = 'none';
+      _showProfContent();
+      _clickPlatformProfileTab(tabName);
+    }
+  }
+
+  /* ── 플랫폼 콘텐츠 영역 숨김/복원 ──────────────────────── */
+  // panel.nextElementSibling: 패널 삽입 후 항상 플랫폼 콘텐츠 컨테이너를 가리킴
+  // stale reference 문제 회피 — 캐시 불필요
+  function _hideProfContent() {
+    const panel = document.getElementById('crk-prof-mytag-panel');
+    const el    = panel?.nextElementSibling;
+    if (el) el.style.setProperty('display', 'none', 'important');
+  }
+
+  function _showProfContent() {
+    const panel = document.getElementById('crk-prof-mytag-panel');
+    const el    = panel?.nextElementSibling;
+    if (el) el.style.removeProperty('display');
+  }
+
+  /* ── 원본 Radix 탭 대리클릭 ──────────────────────────────── */
+  // 플랫폼 탭 id: radix-:xxx:-trigger-character(작품) / -series / -feed
+  function _clickPlatformProfileTab(tabName) {
+    const radixNameMap = { work: 'character', series: 'series', feed: 'feed' };
+    const radixName = radixNameMap[tabName];
+    if (!radixName) return;
+
+    // 캐시된 원본 tablist 참조 사용 (querySelector 충돌 방지)
+    const platformTablist = _profPlatformTablist;
+    if (!platformTablist) return;
+    const targetTab = platformTablist.querySelector(`[id*="trigger-${radixName}"]`);
+    if (!targetTab) return;
+    if (targetTab.getAttribute('data-state') === 'active') return;
+
+    // 잠깐 tablist 복원 → 대리클릭 → 다시 숨김
+    platformTablist.style.removeProperty('display');
+    platformTablist.style.removeProperty('visibility');
+
+    const rect = targetTab.getBoundingClientRect();
+    const cx = rect.left + rect.width / 2;
+    const cy = rect.top  + rect.height / 2;
+    const evtOpts = { bubbles: true, cancelable: true, composed: true,
+                      clientX: cx, clientY: cy, button: 0 };
+    targetTab.dispatchEvent(new PointerEvent('pointerdown', { ...evtOpts, pointerId: 1, pointerType: 'mouse' }));
+    targetTab.dispatchEvent(new MouseEvent('mousedown', evtOpts));
+    targetTab.dispatchEvent(new PointerEvent('pointerup',  { ...evtOpts, pointerId: 1, pointerType: 'mouse' }));
+    targetTab.dispatchEvent(new MouseEvent('mouseup',  evtOpts));
+    targetTab.dispatchEvent(new MouseEvent('click',    evtOpts));
+
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      platformTablist.style.setProperty('display', 'none', 'important');
+    }));
+  }
+
+  /* ── 나만의 태그 패널 렌더링 (프로필 페이지용) ────────────── */
+  function _renderProfileMyTagPanel(panel) {
+    const allTags  = _collectAllTags();
+    const tagNames = Object.keys(allTags).sort();
+
+    panel.innerHTML = '';
+
+    // ── 빈 상태 ──────────────────────────────────────────────
+    if (tagNames.length === 0) {
+      panel.innerHTML = `<p class="crk-lt-empty">태그를 붙인 작품이 없어요.<br>작품 카드에 호버해서 태그를 추가해보세요!</p>`;
+      return;
+    }
+
+    // 유효하지 않은 필터 초기화 (태그가 삭제된 경우)
+    if (_profFilterTag !== 'all' && !allTags[_profFilterTag]) {
+      _profFilterTag = 'all';
+    }
+
+    // ── 필터 버튼 행 ──────────────────────────────────────────
+    const filterRow = document.createElement('div');
+    filterRow.className = 'crk-prof-filter-row';
+    const wrap = document.createElement('div');
+    wrap.className = 'crk-prof-filter-wrap';
+
+    const mkBtn = (label, value) => {
+      const btn = document.createElement('button');
+      btn.className = 'crk-prof-filter-btn' + (value === _profFilterTag ? ' crk-prof-filter-btn-active' : '');
+      btn.dataset.filter = value;
+      btn.textContent = label;
+      btn.type = 'button';
+      return btn;
+    };
+    wrap.appendChild(mkBtn('전체', 'all'));
+    tagNames.forEach(t => wrap.appendChild(mkBtn(t, t)));
+
+    wrap.addEventListener('click', e => {
+      const btn = e.target.closest('.crk-prof-filter-btn');
+      if (!btn) return;
+      _profFilterTag = btn.dataset.filter;
+      _renderProfileMyTagPanel(panel);
+    });
+
+    filterRow.appendChild(wrap);
+    panel.appendChild(filterRow);
+
+    // ── 플랫 카드 그리드 (카테고리 블록 없음) ───────────────
+    const displayTags = _profFilterTag === 'all'
+      ? tagNames
+      : tagNames.filter(t => t === _profFilterTag);
+
+    // 중복 제거: 여러 태그에 동일 작품이 있을 경우 첫 등장만 표시
+    const seen  = new Set();
+    const works = displayTags.flatMap(t => (allTags[t] ?? []).filter(({ id }) => {
+      if (seen.has(id)) return false;
+      seen.add(id);
+      return true;
+    }));
+
+    if (works.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'crk-lt-empty';
+      empty.textContent = '이 태그에 작품이 없어요.';
+      panel.appendChild(empty);
+      return;
+    }
+
+    const grid = document.createElement('div');
+    grid.id        = 'crk-prof-grid';
+    grid.className = 'crk-lt-grid';
+    grid.innerHTML = works.map(({ id }) => _buildMyTagCardHTML(id, _loadCardSnapshot(id))).join('');
+
+    grid.addEventListener('click', e => {
+      const card = e.target.closest('.crk-lt-card');
+      if (!card) return;
+      const id = card.dataset.crkId;
+      if (!id) return;
+      if (card.classList.contains('crk-lt-card-noimg')) {
+        window.open(`/detail/${id}`, '_blank', 'noopener');
+        return;
+      }
+      for (const pc of document.querySelectorAll('[data-crk-peek="1"]')) {
+        if (_getIdFromFiber(pc) === id) { pc.click(); return; }
+      }
+      window.open(`/detail/${id}`, '_blank', 'noopener');
+    });
+    grid.addEventListener('keydown', e => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        const card = e.target.closest('.crk-lt-card');
+        if (card) { e.preventDefault(); card.click(); }
+      }
+    });
+
+    panel.appendChild(grid);
+  }
+
+  /* ── MutationObserver 핸들러: 프로필 탭 앵커 등장 감지 ───── */
+  function _handleProfileNode(node) {
+    if (!_isProfilePage() || !_isOwnProfile()) return;
+    if (document.getElementById('crk-prof-tabs')) return;
+    // tablist가 새로 삽입되면 초기화 시도
+    if (node.getAttribute?.('role') === 'tablist' ||
+        node.querySelector?.('[role="tablist"]')) {
+      setTimeout(_initProfileTabs, 0);
+    }
+  }
+
+  /* ── 프로필 페이지 초기 진입 ─────────────────────────────── */
+  if (_isProfilePage()) {
+    setTimeout(_initProfileTabs,  600);
+    setTimeout(_initProfileTabs, 1400);
+    setTimeout(_initProfileTabs, 2500);
   }
 
   /* ══════════════════════════════════════════════════════════════
@@ -1195,10 +1211,10 @@
   function _saveTags(id, arr) {
     _tagsCache.set(id, arr);
     localStorage.setItem(TAG_LS_PREFIX + id, JSON.stringify(arr));
-    // 좋아요 페이지의 나만의 태그 탭이 열려있으면 패널 갱신
-    if (_isLikedPage() && _likedActiveTab === 'mytag') {
-      const panel = document.getElementById('crk-lt-mytag-panel');
-      if (panel) _renderMyTagPanel(panel);
+    // 프로필 페이지 나만의 태그 탭이 열려 있으면 패널 갱신
+    if (_profActiveTab === 'mytag') {
+      const panel = document.getElementById('crk-prof-mytag-panel');
+      if (panel) _renderProfileMyTagPanel(panel);
     }
   }
 
@@ -1454,6 +1470,7 @@
           if (node.nodeType !== 1) continue;
           _handleModalNode(node);   // §6: 모달 캐싱 + 팝오버 억제
           _handleDetailNode(node);  // §6.7: detail 페이지 mytags 주입
+          _handleProfileNode(node); // §6.9: 프로필 페이지 탭 주입
           _hookAll(node);           // §10: 카드 훅
         }
       }
@@ -1670,130 +1687,14 @@ html.crk-browsing .z-popover:has(img[alt="character_thumbnail"]) {
 }
 
 /* ══════════════════════════════════════════════════════════════
-   §6.8  좋아요 페이지 나만의 태그 탭
+   §6.8 / §6.9  나만의 태그 공통 카드/카테고리 스타일
    ══════════════════════════════════════════════════════════════ */
-
-/* 우리 탭바 — 플랫폼 탭바와 동일한 레이아웃 */
-#crk-liked-tabs {
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 0;
-  border-bottom: 1px solid var(--outline_tertiary, rgba(0,0,0,.12));
-  background: var(--bg_screen, #fff);
-  padding-bottom: 1px;
-  width: 100%;
-  box-sizing: border-box;
-  position: relative;
-  z-index: 11;
-  /* 부모 width 계산이 일시적으로 0/auto가 되는 레이스 컨디션에서도
-     탭바가 가느다란 선으로 짜부러지지 않도록 최소 높이를 강제 고정.
-     (버튼 padding 16px*2 + line-height 1 기준 텍스트 높이 ≈ 48px) */
-  min-height: 48px;
-}
-
-/* 탭 버튼 — 플랫폼 [role="tab"] 스타일 모사 */
-.crk-lt-tab {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  white-space: nowrap;
-  padding: 16px 8px;
-  font-size: 14px;
-  font-weight: 600;
-  line-height: 1;
-  color: var(--text_tertiary, #999);
-  background: none;
-  border: none;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -2px;
-  cursor: pointer;
-  /* flex:1 단축은 flex-basis:0%를 포함 — 부모 width 계산이 흔들리면
-     버튼이 텍스트 내용보다 작게(0까지) 짜부러질 수 있다.
-     flex-basis를 auto로 둬 텍스트 실제 크기를 최소 보장한다. */
-  flex: 1 1 auto;
-  transition: color .12s, border-color .12s, background .12s;
-  font-family: inherit;
-  border-radius: 0;
-}
-.crk-lt-tab:hover {
-  color: var(--text_primary, #111);
-  background: var(--hover, rgba(0,0,0,.04));
-}
-.crk-lt-tab-active {
-  color: var(--primary, #7c74ff) !important;
-  border-bottom-color: var(--primary, #7c74ff) !important;
-}
-
-/* 나만의 태그 패널 */
-#crk-lt-mytag-panel {
-  width: 100%;
-  padding-top: 16px;
-}
 
 /* 카테고리(태그) 목록 */
 .crk-lt-categories {
   display: flex;
   flex-direction: column;
   gap: 8px;
-}
-
-/* 카테고리 한 칸 — 좋아요 페이지 폴더 카드와 유사한 톤 */
-.crk-lt-cat {
-  border-radius: 10px;
-  overflow: hidden;
-}
-
-/* 카테고리 헤더 — 클릭으로 접기/펼치기 */
-.crk-lt-cat-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 12px 14px;
-  background: var(--bg_secondary, rgba(0,0,0,.03));
-  border: none;
-  border-radius: 10px;
-  cursor: pointer;
-  text-align: left;
-  font-family: inherit;
-  transition: background .12s;
-}
-.crk-lt-cat-header:hover {
-  background: rgba(245,166,35,.10);
-}
-.crk-lt-cat-chevron {
-  flex-shrink: 0;
-  color: var(--text_tertiary, #999);
-  transition: transform .18s ease;
-  transform: rotate(0deg);
-}
-.crk-lt-cat-chevron-open {
-  transform: rotate(90deg);
-}
-.crk-lt-cat-name {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--crk-gold, #f5a623);
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.crk-lt-cat-count {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text_tertiary, #aaa);
-  background: rgba(0,0,0,.06);
-  border-radius: 10px;
-  padding: 2px 8px;
-  flex-shrink: 0;
-}
-
-/* 카테고리 본문 (카드 그리드 영역) */
-.crk-lt-cat-body {
-  padding: 14px 4px 18px;
 }
 
 /* 카드 그리드 — 카드 폭(164.8px) 기준 자동 줄바꿈.
@@ -1905,19 +1806,140 @@ html.crk-browsing .z-popover:has(img[alt="character_thumbnail"]) {
   margin: 0;
 }
 
+/* ══════════════════════════════════════════════════════════════
+   §6.9  프로필 페이지 나만의 태그 탭
+   ══════════════════════════════════════════════════════════════ */
+
+/* 우리 탭바 — 플랫폼 탭바와 동일한 레이아웃 */
+#crk-prof-tabs {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0;
+  border-bottom: 1px solid var(--border, rgba(0,0,0,.12));
+  background: transparent;
+  padding-bottom: 1px;
+  width: 100%;
+  box-sizing: border-box;
+  position: relative;
+  min-height: 48px;
+}
+
+/* 탭 버튼 — 플랫폼 [role="tab"] 스타일 모사 */
+.crk-pt-tab {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+  padding: 16px 8px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  color: var(--text_tertiary, #999);
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -2px;
+  cursor: pointer;
+  flex: 1 1 auto;
+  transition: color .12s, border-color .12s, background .12s;
+  font-family: inherit;
+  border-radius: 0;
+}
+.crk-pt-tab:hover {
+  color: var(--text_primary, #111);
+  background: var(--hover, rgba(0,0,0,.04));
+}
+.crk-pt-tab-active {
+  color: var(--primary, #7c74ff) !important;
+  border-bottom-color: var(--primary, #7c74ff) !important;
+}
+
+/* 나만의 태그 패널 */
+#crk-prof-mytag-panel {
+  width: 100%;
+}
+
+/* 카테고리 필터 버튼 행 — 플랫폼 .py-3.flex.gap-2 버튼 행 모사 */
+.crk-prof-filter-row {
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.crk-prof-filter-row::-webkit-scrollbar { display: none; }
+.crk-prof-filter-wrap {
+  padding: 12px 0;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  /* 버튼이 많아도 한 줄로 유지 (가로 스크롤) */
+  width: max-content;
+  min-width: 100%;
+}
+.crk-prof-filter-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border-radius: 9999px !important;
+  padding: 0 12px;
+  height: 36px;
+  min-width: 36px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  /* Tailwind preflight의 button { border: none } reset을 !important로 극복
+     border-color는 CSS 변수 의존 없이 rgba 직접 지정
+     (--border, --chat-foreground 등이 플랫폼에서 검은색으로 정의돼 선택/비선택 구분 불가) */
+  border-width: 1px !important;
+  border-style: solid !important;
+  border-color: rgba(0, 0, 0, .3) !important;   /* 라이트: 연한 회색 테두리 */
+  background: var(--card, #fff);
+  color: var(--line-gray-1, #737373);
+  font-family: inherit;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.crk-prof-filter-btn:hover {
+  background: var(--secondary, rgba(0,0,0,.05));
+}
+/* 선택됨: 진한 테두리 + card 배경 + foreground 글자 */
+.crk-prof-filter-btn-active {
+  border-color: rgba(0, 0, 0, .85) !important;  /* 라이트: 거의 검은 테두리 */
+  background: var(--card, #fff) !important;
+  color: var(--foreground, #111) !important;
+  font-weight: 700;
+}
+
+/* 플랫 카드 그리드 (프로필 탭 전용) */
+#crk-prof-grid {
+  padding-top: 4px;
+}
+
 /* 다크 모드 */
 @media (prefers-color-scheme: dark) {
-  #crk-liked-tabs { background: var(--bg_screen, #0e0e14); }
-  .crk-lt-tab:hover { background: rgba(255,255,255,.05); color: var(--text_primary, #eee); }
-  .crk-lt-cat-header { background: rgba(255,255,255,.05); }
-  .crk-lt-cat-header:hover { background: rgba(245,166,35,.12); }
-  .crk-lt-cat-count { background: rgba(255,255,255,.10); }
   .crk-lt-card {
     background: var(--bg_elevated_primary, #1a1a28);
   }
   .crk-lt-card:hover { box-shadow: 0 6px 20px rgba(0,0,0,.35); }
   .crk-lt-title { color: var(--text_primary, #eee); }
   .crk-lt-thumb { background: rgba(255,255,255,.05); }
+
+  /* 프로필 탭바 */
+  .crk-pt-tab:hover { background: rgba(255,255,255,.05); color: var(--text_primary, #eee); }
+
+  /* 프로필 필터 버튼 */
+  .crk-prof-filter-btn {
+    background: var(--card, #1a1a28);
+    color: var(--line-gray-1, #888);
+    border-color: rgba(255, 255, 255, .3) !important;  /* 다크: 연한 흰색 테두리 */
+  }
+  .crk-prof-filter-btn:hover { background: rgba(255,255,255,.08); }
+  .crk-prof-filter-btn-active {
+    border-color: rgba(255, 255, 255, .85) !important;  /* 다크: 진한 흰색 테두리 */
+    background: var(--card, #1a1a28) !important;
+    color: var(--foreground, #eee) !important;
+  }
 }
 `;
 
