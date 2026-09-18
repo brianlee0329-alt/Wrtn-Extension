@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crack 레이아웃 조절기
 // @namespace    https://github.com/local/crack-layout
-// @version      1.6.0
+// @version      1.6.1
 // @description  채팅창 너비 조절 + 컴팩트 모드
 // @author       Tyme
 // @match        https://crack.wrtn.ai/stories/*
@@ -153,6 +153,15 @@
     //      - #web-modal 래퍼 존재 여부가 불확실해짐 → id 의존 제거, role="dialog" 속성 기반으로 전환
     //      - 출력량 조절 모달과 max-w-[444px] 클래스를 공유하므로 max-h-[85dvh] 부재로 구분
     //    · 카드 블럭 grid selector: cursor="pointer" 속성 → cursor-pointer 클래스로 변경 대응
+    //  변경(v1.6.1):
+    //    · 컴팩트 모드 그룹핑 버그 수정: 인용문(BLOCKQUOTE)이 이미지-텍스트 그룹 내
+    //      원래 위치를 잃고 그룹 맨 끝(텍스트 전부 뒤)으로 밀려나던 문제
+    //      - 원인: HR만 발견 즉시 그룹을 끊었고, 인용문/표/코드블럭은 breakerEls에만
+    //        쌓아두고 계속 다음 요소를 흡수 → 렌더 시 breakerEls가 textEls 전부 뒤에
+    //        일괄 배치되어 원래 문서상 위치(중간)를 잃음
+    //      - 수정: isBreaker()에 HR 통합, 모든 breaker(HR/인용문/표/코드블럭)가
+    //        발견 즉시 그룹을 종료하도록 통일 → 원본 문서 순서 그대로 보존되며
+    //        그 자리에서 독립된 한 줄(row)을 차지
     // =========================================================================
 
     // ── 설정 ─────────────────────────────────────────────────────────────────
@@ -295,12 +304,24 @@
                 gap: 10px 14px !important;
             }
 
-            /* ── 최대 출력량 조절 모달: 모델별 블럭 자동 2열 grid ── */
+            /* ── 최대 출력량 조절 모달: 모델별 아코디언 자동 2열 grid ──
+               플랫폼이 항상-펼침 카드 목록 → Radix Accordion(한 번에 하나만 펼침)으로 개편.
+               구 selector(.flex.flex-col.gap-4.py-6)의 대상이 사라져 완전히 무효화됨.
+               - 리스트 컨테이너: data-orientation="vertical" + .flex.flex-col 인데
+                 항목(border-outline_tertiary)은 아니므로 :not()으로 구분
+               - 각 항목 자체가 data-state="open/closed" 속성을 직접 가짐(:has() 불필요)
+               - 열린 항목은 grid-column: 1/-1로 자기 행 전체를 단독 차지 →
+                 접힌 옆 칸 높이에 영향 주지 않음 */
             div[role="dialog"][class*="max-w-[444px]"][class*="max-h-[85dvh]"]
-                div.flex.flex-col:has(> div.flex.flex-col.gap-4.py-6) {
+                div[data-orientation="vertical"].flex.flex-col:not([class*="border-outline_tertiary"]) {
                 display: grid !important;
                 grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)) !important;
                 gap: 0 20px !important;
+                align-items: start !important;
+            }
+            div[role="dialog"][class*="max-w-[444px]"][class*="max-h-[85dvh]"]
+                div[class*="border-outline_tertiary"][data-state="open"] {
+                grid-column: 1 / -1 !important;
             }
 
             /* ── 패널 슬라이더 공통 ── */
@@ -413,7 +434,8 @@
     }
 
     function isBreaker(el) {
-        return el.tagName === 'BLOCKQUOTE' ||
+        return el.tagName === 'HR' ||
+               el.tagName === 'BLOCKQUOTE' ||
                el.tagName === 'TABLE' ||
                (el.tagName === 'DIV' && (
                    el.classList.contains('wrtn-codeblock') ||
@@ -452,15 +474,12 @@
                 i++;
 
                 while (i < expandedChildren.length && !isImgParagraph(expandedChildren[i])) {
-                    if (expandedChildren[i].tagName === 'HR') {
+                    if (isBreaker(expandedChildren[i])) {
                         breakerEls.push(expandedChildren[i]);
                         i++;
                         break;
-                    } else if (isBreaker(expandedChildren[i])) {
-                        breakerEls.push(expandedChildren[i]);
-                    } else {
-                        textEls.push(expandedChildren[i]);
                     }
+                    textEls.push(expandedChildren[i]);
                     i++;
                 }
 
