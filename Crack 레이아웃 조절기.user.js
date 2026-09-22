@@ -1,9 +1,8 @@
 // ==UserScript==
 // @name         Crack 레이아웃 조절기
 // @namespace    https://github.com/local/crack-layout
-// @version      1.6.1
+// @version      1.6.2
 // @description  채팅창 너비 조절 + 컴팩트 모드
-// @author       Tyme
 // @match        https://crack.wrtn.ai/stories/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -120,6 +119,141 @@
     injectAntiScrollStyle();
     window.addEventListener('DOMContentLoaded', injectAntiScrollStyle);
 
+    // 모델 선택창의 동적 생성 변화를 감지하고 레이아웃을 재배치하는 함수
+    // (v1.6.3: 플랫폼이 이 모달을 Radix Select → cmdk 콤보박스로 교체.
+    //  data-radix-select-viewport 속성이 완전히 사라짐 → 항상 0건 매칭되어
+    //  전체 기능이 무효화된 상태였음.
+    //  새 구조: [cmdk-list-sizer](옵션 직계 부모, 구 viewport 역할)
+    //         → .closest('[role="dialog"]')가 바깥 박스(구 content 역할, 폭/높이 대상)
+    //  ※ role="listbox"는 이제 cmdk-list(바깥 박스의 자식)로 이동해 더 이상
+    //    바깥 박스를 가리키지 않음 — role="dialog"로 교체
+    //  ※ 바깥 박스 높이가 max-height(450px)가 아닌 실제 height(h-[min(569px,...)])로
+    //    바뀜 — 접힘 상태는 인라인 스타일을 비워 클래스 값이 그대로 적용되게 하고,
+    //    펼침 상태만 height를 직접 지정
+    //  ⚠ cmdk-list-sizer는 cmdk 라이브러리의 범용 마커라 플랫폼 내 다른 cmdk 기반
+    //    콤보박스(검색창 등)에도 쓰일 수 있음 — 다른 곳에서 오작동하면 알려줘
+    const adjustModelModalLayout = () => {
+        const sizers = document.querySelectorAll('[cmdk-list-sizer]');
+
+        sizers.forEach(sizer => {
+            // 무한 루프를 방지하기 위해 이미 처리된 요소는 건너뜁니다.
+            if (sizer.dataset.customLayoutApplied) return;
+
+            // 1. 위치 버그 해결: 최상위 래퍼가 아닌 '내부 컨텐츠'의 너비를 늘립니다.
+            const content = sizer.closest('[role="dialog"]');
+            if (content) {
+                content.style.position = 'relative'; // 확장 버튼 절대배치 기준점 확보
+                content.style.width = '850px'; // 3열을 수용할 충분한 너비
+                content.style.maxWidth = '90vw'; // 화면을 벗어나지 않도록 제한
+            }
+
+            // 2. CSS Grid 활성화
+            sizer.style.display = 'grid';
+            sizer.style.gridTemplateColumns = 'repeat(3, 1fr)';
+            sizer.style.gap = '8px';
+            sizer.style.padding = '10px';
+            sizer.style.alignItems = 'start';
+
+            // 3. 열 제목(헤더) 추가 함수
+            const addHeader = (text, col) => {
+                const header = document.createElement('div');
+                header.textContent = text;
+                header.style.gridColumn = col;
+                header.style.gridRow = '1'; // 항상 첫 번째 줄에 고정
+                header.style.fontWeight = 'bold';
+                header.style.borderBottom = '1px solid rgba(128, 128, 128, 0.3)';
+                header.style.paddingBottom = '5px';
+                header.style.marginBottom = '5px';
+                header.className = 'custom-grid-header';
+                sizer.appendChild(header);
+            };
+
+            // 헤더가 중복 생성되지 않도록 검사 후 삽입
+            if (!sizer.querySelector('.custom-grid-header')) {
+                addHeader('하이엔드', '1');
+                addHeader('스탠다드', '2');
+                addHeader('엔트리', '3');
+            }
+
+            // 4. 모델 텍스트 기반 카테고리 분류 및 배치
+            const options = Array.from(sizer.querySelectorAll('[role="option"]'));
+
+            // 각 열(Column)별로 항목이 들어갈 행(Row) 번호를 추적합니다. (1행은 헤더)
+            let highEndRow = 2, standardRow = 2, entryRow = 2, unclassifiedRow = 2;
+
+            options.forEach(opt => {
+                const text = opt.textContent;
+
+                // 옵션 카드 시각적 개선
+                opt.style.border = '1px solid rgba(128, 128, 128, 0.2)';
+                opt.style.borderRadius = '6px';
+                opt.style.padding = '8px';
+                opt.style.height = 'auto';
+
+                // 키워드에 따라 위치할 열(Column)과 행(Row)을 강제 지정합니다.
+                if (text.includes('페이블') || text.includes('하이퍼')) {
+                    opt.style.gridColumn = '1';
+                    opt.style.gridRow = highEndRow++;
+                } else if (text.includes('슈퍼') || text.includes('프로')) {
+                    opt.style.gridColumn = '2';
+                    opt.style.gridRow = standardRow++;
+                } else if (text.includes('파워')) {
+                    opt.style.gridColumn = '3';
+                    opt.style.gridRow = entryRow++;
+                } else {
+                    // 향후 새로운 모델이 추가될 경우 하단 전체를 차지하도록 예외 처리 (오류 방지)
+                    opt.style.gridColumn = '1 / span 3';
+                    opt.style.gridRow = Math.max(highEndRow, standardRow, entryRow) + unclassifiedRow++;
+                }
+            });
+
+            // 5. 상하 길이 확장 토글 버튼 삽입 (content당 1회만)
+            if (content && !content.querySelector('.ck-model-expand-btn')) {
+                const expandBtn = document.createElement('button');
+                expandBtn.type = 'button';
+                expandBtn.className = 'ck-model-expand-btn';
+                expandBtn.setAttribute('aria-label', '모델 목록 펼치기/접기');
+                expandBtn.style.cssText = [
+                    'position:absolute', 'top:6px', 'right:8px', 'z-index:20',
+                    'display:flex', 'align-items:center', 'justify-content:center',
+                    'width:22px', 'height:22px', 'padding:0', 'border:none',
+                    'background:rgba(128,128,128,0.15)', 'border-radius:4px',
+                    'cursor:pointer', 'transition:transform .2s',
+                ].join(';');
+                expandBtn.innerHTML = '<svg fill="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" style="width:16px;height:16px;pointer-events:none;"><path clip-rule="evenodd" fill-rule="evenodd" d="m5.645 9.566 1.13-1.132L12 13.66l5.224-5.225 1.132 1.132L12 15.92z"></path></svg>';
+
+                const applyExpandState = () => {
+                    if (CFG.modelModalExpanded) {
+                        content.style.height = 'var(--radix-popper-available-height, 90vh)';
+                        expandBtn.style.transform = 'rotate(180deg)';
+                    } else {
+                        content.style.height = ''; // 비워서 플랫폼 기본 h-[min(569px,...)] 클래스로 복귀
+                        expandBtn.style.transform = 'rotate(0deg)';
+                    }
+                };
+                applyExpandState();
+
+                expandBtn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    CFG.modelModalExpanded = !CFG.modelModalExpanded;
+                    save();
+                    applyExpandState();
+                });
+
+                content.appendChild(expandBtn);
+            }
+
+            // 처리가 완료되었음을 표시
+            sizer.dataset.customLayoutApplied = 'true';
+        });
+    };
+
+    // DOM의 변화를 감시하다가 모달이 팝업되면 즉시 재배치 함수를 실행합니다.
+    // (스크립트 로드 시 단 1회만 생성/구독됨)
+    const modelModalObserver = new MutationObserver(adjustModelModalLayout);
+    modelModalObserver.observe(document.body, { childList: true, subtree: true });
+
     // 채팅방을 벗어나면 방어막 즉시 해제
     // ※ 원본의 500ms setInterval은 유지 (단순 플래그 토글, GC 부하 미미)
     setInterval(() => {
@@ -171,6 +305,7 @@
         profileWidth:  GM_getValue('ck_profileWidth',  444),
         userNoteWidth: GM_getValue('ck_userNoteWidth', 512),
         outputWidth:   GM_getValue('ck_outputWidth',   444),
+        modelModalExpanded: GM_getValue('ck_modelModalExpanded', false),
     };
 
     function save() {
@@ -179,6 +314,7 @@
         GM_setValue('ck_profileWidth',  CFG.profileWidth);
         GM_setValue('ck_userNoteWidth', CFG.userNoteWidth);
         GM_setValue('ck_outputWidth',   CFG.outputWidth);
+        GM_setValue('ck_modelModalExpanded', CFG.modelModalExpanded);
     }
 
     // ── CSS 주입 ──────────────────────────────────────────────────────────────
