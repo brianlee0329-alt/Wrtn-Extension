@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         좋아요 목록 관리
 // @namespace    https://github.com/workforomg/Util
-// @version      3.0.0
+// @version      3.0.1
 // @description  컬렉션 전체 표시 / 좋아요 목록 접기 / 작품 검색 / 컬렉션 태그
 // @match        https://crack.wrtn.ai/liked*
 // @match        https://crack.wrtn.ai/collections/*
@@ -16,7 +16,6 @@
     // §0. 마이그레이션 / 상수 / 선택자
     // ─────────────────────────────────────────────────────────────────
 
-    // v2.0.x 구형식 폴더 데이터 자동 삭제 (일회성)
     localStorage.removeItem('liked_folders_v1');
 
     const PAGE_TITLE_SEL = '#liked-scroll p[class*="typo-text-2xl"]';
@@ -26,30 +25,32 @@
     const CAROUSEL_SEL   = '#liked-scroll [aria-roledescription="carousel"]';
     const SLIDE_SEL      = '[aria-roledescription="slide"]';
 
-    const LAYOUT_KEY       = 'crk-liked-col-layout';     // 컬렉션 행 순서 + 색상
-    const COLLAPSE_KEY     = 'crk-liked-grid-collapsed'; // 작품 그리드 접기 상태
-    const COL_COLLAPSE_KEY = 'crk-liked-col-collapsed';  // 컬렉션 섹션 접기 상태
-    const COL_CACHE_PREFIX = 'crk-col-cache::';           // 컬렉션 카드 캐시
+    const LAYOUT_KEY       = 'crk-liked-col-layout';
+    const COLLAPSE_KEY     = 'crk-liked-grid-collapsed';
+    const COL_COLLAPSE_KEY = 'crk-liked-col-collapsed';
+    const COL_CACHE_PREFIX = 'crk-col-cache::';
 
     // ─────────────────────────────────────────────────────────────────
     // §1. CSS
     // ─────────────────────────────────────────────────────────────────
     GM_addStyle(`
-        /* ── 검색 버튼 + 검색바 ── */
-        #lf-search-btn {
-            font-size: 14px; padding: 1px 8px; border-radius: 6px;
-            border: none; background: rgba(125,125,125,.12);
-            color: inherit; cursor: pointer; flex-shrink: 0;
-        }
-        #lf-search-btn:hover { background: rgba(125,125,125,.22); }
-        /* 탭 아래 고정 검색창 */
-        #lf-search-bar {
-            position: sticky;
-            z-index: 9;
-            background: var(--bg_screen, #fff);
-            padding: 6px 0 8px;
-            box-shadow: 0 -50px 0 50px var(--bg_screen, #fff);
-        }
+	/* 1. 스토리/캐릭터 탭 컨테이너 (속성 선택자로 타겟팅) */
+	div[data-lf-sticky="1"] {
+ 	   position: sticky !important;
+	    top: 0 !important;              /* 화면 맨 위에 붙임 (기존 56px 덮어쓰기) */
+	    z-index: 100 !important;        /* 검색창보다 위에 오도록 높은 레이어 부여 */
+	    background: var(--bg_screen, #fff) !important;
+	}
+
+	/* 2. 검색창 (#lf-search-bar) */
+	#lf-search-bar {
+ 	   position: sticky !important;
+  	  top: 48px !important;           /* 탭 요소 높이(약 48px) 바로 밑에 고정 */
+  	  z-index: 99 !important;         /* 탭보다는 살짝 낮게 설정 */
+  	  margin-top: 0 !important;        /* 보이지 않는 상단 여백 제거 */
+  	  background: var(--bg_screen, #fff) !important;
+  	  padding: 6px 0 8px;
+	}
         .lf-search-input {
             display: block; width: 100%; padding: 10px 15px; border-radius: 10px;
             border: 1px solid var(--outline_tertiary, #e0e0e0);
@@ -67,7 +68,7 @@
         .lf-col-hdr-title {
             font-size: 15px; font-weight: 600;
             color: var(--foreground, #000);
-            flex: 1; /* justify-between 3분할 방지 → 버튼들을 오른쪽으로 */
+            flex: 1;
         }
         .lf-col-edit-btn {
             font-size: 12px; padding: 3px 10px; border-radius: 6px;
@@ -100,27 +101,22 @@
             border-radius: 10px; overflow: hidden;
             background: var(--bg_secondary, #f0f0f0);
         }
-        .lf-col-thumbs img {
-            width: 100%; height: 100%; object-fit: cover; display: block;
-        }
-        .lf-col-thumb-ph {
-            background: rgba(125,125,125,.1); width: 100%; height: 100%;
-        }
+        .lf-col-thumbs img { width: 100%; height: 100%; object-fit: cover; display: block; }
+        .lf-col-thumb-ph { background: rgba(125,125,125,.1); width: 100%; height: 100%; }
         .lf-col-name {
             font-size: 13px; font-weight: 600; color: var(--primary, #000);
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
         .lf-col-count { font-size: 12px; color: var(--muted-foreground, #888); }
 
-        /* ── 접기/펼치기 버튼 (공통) ── */
+        /* ── 접기/펼치기 버튼 ── */
         #lf-toggle-btn, #lf-col-toggle-btn {
             font-size: 12px; padding: 2px 10px; border-radius: 6px;
             border: none; background: rgba(125,125,125,.12);
             color: inherit; cursor: pointer; font-weight: 500; flex-shrink: 0;
         }
         #lf-toggle-btn:hover, #lf-col-toggle-btn:hover { background: rgba(125,125,125,.22); }
-        /* 그리드 헤더 버튼들 사이 간격 */
-        #lf-search-btn, #lf-toggle-btn { margin-right: 6px; }
+        #lf-toggle-btn { margin-right: 6px; }
 
         /* ── 편집 모달 ── */
         #lf-col-modal-overlay {
@@ -134,16 +130,11 @@
             color: #222; box-sizing: border-box;
         }
         #lf-col-modal h3 { margin: 0; font-size: 17px; }
+        .lf-modal-body { display: flex; gap: 14px; flex: 1; min-height: 0; overflow: hidden; }
 
-        .lf-modal-body {
-            display: flex; gap: 14px; flex: 1; min-height: 0; overflow: hidden;
-        }
-
-        /* 왼쪽: 행 목록 */
         .lf-rows-pane {
             width: 210px; flex-shrink: 0; display: flex; flex-direction: column;
-            border: 1px solid #ddd; border-radius: 10px; overflow: hidden;
-            background: #fafafa;
+            border: 1px solid #ddd; border-radius: 10px; overflow: hidden; background: #fafafa;
         }
         .lf-rows-pane-hdr {
             padding: 8px 10px; background: #eee; font-weight: 700;
@@ -173,26 +164,22 @@
         }
         .lf-row-btns button:hover { background: #eee; }
         .lf-rb-del { color: #c33 !important; }
-        /* 행 이름 편집 아이콘 */
         .lf-rb-rename {
             font-size: 12px; padding: 1px 4px; border-radius: 3px;
             border: none; background: transparent; cursor: pointer;
             color: #888; flex-shrink: 0; line-height: 1;
         }
         .lf-rb-rename:hover { background: #dde8ff; }
-        /* 인라인 편집 input */
         .lf-row-name-inline-inp {
             flex: 1; min-width: 0; padding: 1px 6px; border-radius: 4px;
             border: 1px solid #aac4f0; font-size: 13px; outline: none;
             background: #fff; font-weight: inherit;
         }
 
-        /* 오른쪽: 듀얼 패널 */
         .lf-dual { flex: 1; display: flex; gap: 10px; min-height: 0; }
         .lf-pane {
             flex: 1; display: flex; flex-direction: column;
-            border: 1px solid #ddd; border-radius: 10px;
-            overflow: hidden; background: #fafafa;
+            border: 1px solid #ddd; border-radius: 10px; overflow: hidden; background: #fafafa;
         }
         .lf-pane-title {
             padding: 7px 10px; background: #eee; font-weight: 700;
@@ -209,9 +196,7 @@
             border-radius: 5px; border: 1px solid transparent;
         }
         .lf-col-item:hover { background: #eef; }
-        .lf-col-item-name {
-            flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-        }
+        .lf-col-item-name { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .lf-col-ord, .lf-col-action {
             font-size: 11px; padding: 2px 6px; border-radius: 3px;
             border: 1px solid #ccc; background: #fff; cursor: pointer;
@@ -222,26 +207,17 @@
         .lf-col-action.add { color: #007aff; border-color: #007aff; }
         .lf-col-action.remove { color: #c33; border-color: #c33; }
 
-        /* ── 색상 스와치 (모달 내) ── */
+        /* ── 색상 스와치 ── */
         .lf-col-swatch {
             width: 16px; height: 16px; border-radius: 50%;
-            border: 2px solid #bbb; cursor: pointer; flex-shrink: 0;
-            padding: 0; background: #e0e0e0;
+            border: 2px solid #bbb; cursor: pointer; flex-shrink: 0; padding: 0; background: #e0e0e0;
         }
         .lf-col-swatch:hover { transform: scale(1.15); }
+        .lf-col-name-row { display: flex; align-items: center; gap: 5px; }
+        .lf-col-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 
-        /* ── 컬렉션 이름 옆 색상 점 ── */
-        .lf-col-name-row {
-            display: flex; align-items: center; gap: 5px;
-        }
-        .lf-col-dot {
-            width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
-        }
-
-        /* ── 태그 배지 (카드 내) ── */
-        .lf-tag-wrap {
-            display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px;
-        }
+        /* ── 태그 배지 ── */
+        .lf-tag-wrap { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 3px; }
         .lf-tag-badge {
             display: inline-flex; align-items: center;
             font-size: 10px; padding: 1px 6px; border-radius: 9px;
@@ -254,24 +230,16 @@
         }
         .lf-tag-del:hover { opacity: 1; }
 
-        .lf-empty-hint {
-            color: #aaa; font-size: 12px; padding: 10px; text-align: center;
-        }
-
-        .lf-modal-footer {
-            display: flex; justify-content: flex-end;
-            padding-top: 10px; border-top: 1px solid #eee;
-        }
+        .lf-empty-hint { color: #aaa; font-size: 12px; padding: 10px; text-align: center; }
+        .lf-modal-footer { display: flex; justify-content: flex-end; padding-top: 10px; border-top: 1px solid #eee; }
         .lf-modal-footer button {
             padding: 8px 22px; border-radius: 8px; background: #007aff;
-            color: #fff; cursor: pointer; font-size: 13px;
-            border: none; font-weight: 600;
+            color: #fff; cursor: pointer; font-size: 13px; border: none; font-weight: 600;
         }
     `);
 
     // ─────────────────────────────────────────────────────────────────
-    // §2. 컬렉션 레이아웃 저장소
-    // 형식: { rows: [{ label: string, ids: string[] }, ...] }
+    // §2. 레이아웃 저장소
     // ─────────────────────────────────────────────────────────────────
     function getLayout() {
         try {
@@ -281,19 +249,16 @@
             return d;
         } catch { return { rows: [], colColors: {} }; }
     }
-
+    function saveLayout(layout) { localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout)); }
     function getColColor(colId) { return getLayout().colColors[colId] || null; }
     function setColColor(colId, color) {
         const layout = getLayout();
         layout.colColors[colId] = color;
         saveLayout(layout);
     }
-    function saveLayout(layout) {
-        localStorage.setItem(LAYOUT_KEY, JSON.stringify(layout));
-    }
 
     // ─────────────────────────────────────────────────────────────────
-    // §3. 컬렉션 데이터 추출 (캐러셀 DOM → 데이터 배열)
+    // §3. 컬렉션 데이터 추출
     // ─────────────────────────────────────────────────────────────────
     function extractCollections() {
         const carousel = document.querySelector(CAROUSEL_SEL);
@@ -304,7 +269,6 @@
             const m = a.href.match(/\/collections\/([a-f0-9]{24})/i);
             if (!m) return [];
             const id = m[1];
-            // Emotion 해시 없는 순수 Tailwind: class*= 방식으로 안전하게 탐색
             const name  = slide.querySelector('p[class*="typo-text-base"]')?.textContent?.trim() || '';
             const count = slide.querySelector('p[class*="typo-text-sm"]')?.textContent?.trim()  || '';
             const thumbs = Array.from(slide.querySelectorAll('img')).map(i => i.src).slice(0, 4);
@@ -324,20 +288,16 @@
         if (!collections.length) return;
         _cachedCollections = collections;
 
-        // 원본 캐러셀 섹션 숨기기 (React 노드 이동 없이 display:none만)
         const carouselSection = document.querySelector(CAROUSEL_SEL)?.closest('section');
         if (carouselSection) carouselSection.style.display = 'none';
 
-        // 레이아웃 초기화/동기화
         let layout = getLayout();
         const knownIds = new Set(layout.rows.flatMap(r => r.ids));
 
         if (!layout.rows.length) {
-            // 최초 실행: 전체를 단일 행으로
             layout.rows = [{ label: '', ids: collections.map(c => c.id) }];
             saveLayout(layout);
         } else {
-            // 신규 컬렉션(아직 레이아웃에 없는 것) → 첫 번째 행 앞에 추가
             const newIds = collections.map(c => c.id).filter(id => !knownIds.has(id));
             if (newIds.length) {
                 layout.rows[0].ids = [...newIds, ...layout.rows[0].ids];
@@ -345,7 +305,6 @@
             }
         }
 
-        // 섹션 DOM 구성
         const section = document.createElement('div');
         section.id = 'lf-col-section';
 
@@ -379,7 +338,6 @@
         layout.rows.forEach(row => {
             const validIds = row.ids.filter(id => colMap.has(id));
             if (!validIds.length) return;
-
             const rowWrap = document.createElement('div');
             if (row.label) {
                 const labelEl = document.createElement('div');
@@ -395,14 +353,11 @@
         });
         section.appendChild(rowsWrap);
 
-        // 초기 collapsed 상태 적용
         if (initColCollapsed) rowsWrap.style.display = 'none';
 
-        // 캐러셀 섹션 바로 앞에 삽입
         if (carouselSection) {
             carouselSection.insertAdjacentElement('beforebegin', section);
         } else {
-            // 캐러셀 미탐지 시 liked-scroll 내부 첫 flex 컨테이너에 삽입
             const inner = document.querySelector('#liked-scroll .flex.flex-1.flex-col');
             if (inner) inner.insertBefore(section, inner.firstChild);
         }
@@ -410,36 +365,26 @@
 
     function buildCollectionCard(col) {
         const color = getColColor(col.id);
-
         const a = document.createElement('a');
         a.className = 'lf-col-card';
         a.href = `/collections/${col.id}`;
-        // SPA 라우터 우회: 원본 캐러셀의 React Router Link를 빌려서 클릭
         a.onclick = e => {
             e.preventDefault();
-            const origLink = document.querySelector(
-                `${CAROUSEL_SEL} a[href*="/collections/${col.id}"]`
-            );
+            const origLink = document.querySelector(`${CAROUSEL_SEL} a[href*="/collections/${col.id}"]`);
             if (origLink) {
-                origLink.dispatchEvent(
-                    new MouseEvent('click', { bubbles: true, cancelable: true })
-                );
+                origLink.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
             } else {
-                // fallback: history API (라우터가 popstate를 감지하는 경우)
                 window.history.pushState({}, '', `/collections/${col.id}`);
                 window.dispatchEvent(new PopStateEvent('popstate'));
             }
         };
 
-        // 썸네일
         const thumbs = document.createElement('div');
         thumbs.className = 'lf-col-thumbs';
         for (let i = 0; i < 4; i++) {
             if (col.thumbs[i]) {
                 const img = document.createElement('img');
-                img.src = col.thumbs[i];
-                img.alt = '';
-                img.loading = 'lazy';
+                img.src = col.thumbs[i]; img.alt = ''; img.loading = 'lazy';
                 thumbs.appendChild(img);
             } else {
                 const ph = document.createElement('div');
@@ -449,7 +394,6 @@
         }
         a.appendChild(thumbs);
 
-        // 이름 행 (색상 점 포함)
         const nameRow = document.createElement('div');
         nameRow.className = 'lf-col-name-row';
         if (color) {
@@ -505,22 +449,16 @@
         document.body.appendChild(overlay);
 
         function save() { saveLayout(layout); }
-
-        function close() {
-            overlay.remove();
-            renderCollectionSection();
-        }
+        function close() { overlay.remove(); renderCollectionSection(); }
 
         overlay.onclick = close;
         document.getElementById('lf-col-modal-close').onclick = close;
         document.getElementById('lf-add-row-btn').onclick = () => {
             layout.rows.push({ label: '', ids: [] });
             selIdx = layout.rows.length - 1;
-            save();
-            renderRowList();
+            save(); renderRowList();
         };
 
-        // ── 행 목록 ──
         function renderRowList() {
             const list = document.getElementById('lf-row-list');
             if (!list) return;
@@ -528,8 +466,7 @@
 
             if (!layout.rows.length) {
                 list.innerHTML = '<div class="lf-empty-hint">행이 없습니다</div>';
-                renderDual();
-                return;
+                renderDual(); return;
             }
 
             layout.rows.forEach((row, idx) => {
@@ -541,33 +478,26 @@
                         <span style="color:#aaa;font-size:11px;font-weight:400;">${row.ids.length}개</span>
                     </span>
                     <div class="lf-row-btns">
-                        <button class="rb-up" title="위로">▲</button>
-                        <button class="rb-dn" title="아래로">▼</button>
-                        <button class="rb-del lf-rb-del" title="삭제">✕</button>
+                        <button class="rb-up">▲</button>
+                        <button class="rb-dn">▼</button>
+                        <button class="rb-del lf-rb-del">✕</button>
                     </div>
                 `;
-                // ✏️ 클릭 → 이름 span을 input으로 교체 (인라인 편집)
                 item.querySelector('.lf-rb-rename').onclick = e => {
                     e.stopPropagation();
                     if (item.querySelector('.lf-row-name-inline-inp')) return;
                     const nameSpan = item.querySelector('.lf-row-item-name');
                     const inp = document.createElement('input');
                     inp.className = 'lf-row-name-inline-inp';
-                    inp.value = row.label;
-                    inp.placeholder = '행 이름 (선택)';
-                    const finish = () => {
-                        row.label = inp.value.trim();
-                        save();
-                        renderRowList();
-                    };
+                    inp.value = row.label; inp.placeholder = '행 이름 (선택)';
+                    const finish = () => { row.label = inp.value.trim(); save(); renderRowList(); };
                     inp.onblur = finish;
                     inp.onkeydown = e2 => {
                         e2.stopPropagation();
                         if (e2.key === 'Enter') inp.blur();
                         if (e2.key === 'Escape') { inp.value = row.label; inp.blur(); }
                     };
-                    nameSpan.replaceWith(inp);
-                    inp.focus(); inp.select();
+                    nameSpan.replaceWith(inp); inp.focus(); inp.select();
                 };
                 item.querySelector('.rb-up').onclick = e => { e.stopPropagation(); moveRow(idx, -1); };
                 item.querySelector('.rb-dn').onclick = e => { e.stopPropagation(); moveRow(idx, 1); };
@@ -576,20 +506,15 @@
                     const orphaned = layout.rows[idx].ids;
                     layout.rows.splice(idx, 1);
                     if (orphaned.length) {
-                        if (layout.rows.length) {
-                            layout.rows[0].ids = [...orphaned, ...layout.rows[0].ids];
-                        } else {
-                            layout.rows = [{ label: '', ids: orphaned }];
-                        }
+                        if (layout.rows.length) layout.rows[0].ids = [...orphaned, ...layout.rows[0].ids];
+                        else layout.rows = [{ label: '', ids: orphaned }];
                     }
                     selIdx = Math.min(selIdx, layout.rows.length - 1);
-                    save();
-                    renderRowList();
+                    save(); renderRowList();
                 };
                 item.onclick = () => { selIdx = idx; renderRowList(); };
                 list.appendChild(item);
             });
-
             renderDual();
         }
 
@@ -597,12 +522,9 @@
             const to = idx + dir;
             if (to < 0 || to >= layout.rows.length) return;
             [layout.rows[idx], layout.rows[to]] = [layout.rows[to], layout.rows[idx]];
-            selIdx = to;
-            save();
-            renderRowList();
+            selIdx = to; save(); renderRowList();
         }
 
-        // ── 듀얼 패널 (미배치 ↔ 이 행) ──
         function renderDual() {
             const dual = document.getElementById('lf-dual');
             if (!dual) return;
@@ -628,25 +550,17 @@
                 </div>
             `;
 
-            // 미배치 목록
             const unassignedEl = document.getElementById('lf-unassigned');
             unassigned.forEach(col => {
                 const item = document.createElement('div');
                 item.className = 'lf-col-item';
                 item.innerHTML = `<span class="lf-col-item-name">${_esc(col.name)}</span>
                     <button class="lf-col-action add">추가 →</button>`;
-                item.querySelector('button').onclick = () => {
-                    row.ids.push(col.id);
-                    save();
-                    renderDual();
-                };
+                item.querySelector('button').onclick = () => { row.ids.push(col.id); save(); renderDual(); };
                 unassignedEl.appendChild(item);
             });
-            if (!unassigned.length) {
-                unassignedEl.innerHTML = '<div class="lf-empty-hint">모두 배치됨</div>';
-            }
+            if (!unassigned.length) unassignedEl.innerHTML = '<div class="lf-empty-hint">모두 배치됨</div>';
 
-            // 배치된 목록
             const assignedEl = document.getElementById('lf-assigned');
             row.ids.forEach((id, idx) => {
                 const col = colMap.get(id);
@@ -654,7 +568,6 @@
                 const item = document.createElement('div');
                 item.className = 'lf-col-item';
 
-                // 색상 스와치
                 const swatch = document.createElement('button');
                 swatch.className = 'lf-col-swatch';
                 const curColor = layout.colColors?.[id] || '';
@@ -675,10 +588,7 @@
                         swatch.style.borderColor = ev.target.value;
                         save();
                     };
-                    picker.onchange = () => {
-                        picker.remove();
-                        renderCollectionSection(); // 그리드 색상 점 즉시 반영
-                    };
+                    picker.onchange = () => { picker.remove(); renderCollectionSection(); };
                     picker.click();
                 };
                 item.appendChild(swatch);
@@ -688,22 +598,9 @@
                 nameSpan.textContent = col.name;
                 item.appendChild(nameSpan);
 
-                const up  = document.createElement('button');
-                up.className  = 'lf-col-ord';
-                up.textContent = '▲';
-                up.disabled = idx === 0;
-                up.title = '위로';
-
-                const dn  = document.createElement('button');
-                dn.className  = 'lf-col-ord';
-                dn.textContent = '▼';
-                dn.disabled = idx === row.ids.length - 1;
-                dn.title = '아래로';
-
-                const rm  = document.createElement('button');
-                rm.className  = 'lf-col-action remove';
-                rm.textContent = '✕';
-                rm.title = '제거';
+                const up = document.createElement('button'); up.className = 'lf-col-ord'; up.textContent = '▲'; up.disabled = idx === 0;
+                const dn = document.createElement('button'); dn.className = 'lf-col-ord'; dn.textContent = '▼'; dn.disabled = idx === row.ids.length - 1;
+                const rm = document.createElement('button'); rm.className = 'lf-col-action remove'; rm.textContent = '✕';
 
                 up.onclick = () => { [row.ids[idx-1], row.ids[idx]] = [row.ids[idx], row.ids[idx-1]]; save(); renderDual(); };
                 dn.onclick = () => { [row.ids[idx], row.ids[idx+1]] = [row.ids[idx+1], row.ids[idx]]; save(); renderDual(); };
@@ -712,63 +609,40 @@
                 [up, dn, rm].forEach(b => item.appendChild(b));
                 assignedEl.appendChild(item);
             });
-            if (!row.ids.length) {
-                assignedEl.innerHTML = '<div class="lf-empty-hint">비어있음</div>';
-            }
+            if (!row.ids.length) assignedEl.innerHTML = '<div class="lf-empty-hint">비어있음</div>';
         }
 
         renderRowList();
     }
 
     function _esc(s) {
-        return (s || '').replace(/[&<>"']/g, c => (
-            { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]
-        ));
+        return (s || '').replace(/[&<>"']/g, c =>
+            ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[c]));
     }
 
     // ─────────────────────────────────────────────────────────────────
     // §6. 접기/펼치기 상태 관리
     // ─────────────────────────────────────────────────────────────────
-
-    // 작품 그리드
-    function getGridCollapsed() {
-        return localStorage.getItem(COLLAPSE_KEY) === 'true';
-    }
-    function setGridCollapsed(v) {
-        localStorage.setItem(COLLAPSE_KEY, v ? 'true' : 'false');
-    }
-
-    // 컬렉션 섹션
-    function getColCollapsed() {
-        return localStorage.getItem(COL_COLLAPSE_KEY) === 'true';
-    }
-    function setColCollapsed(v) {
-        localStorage.setItem(COL_COLLAPSE_KEY, v ? 'true' : 'false');
-    }
+    function getGridCollapsed() { return localStorage.getItem(COLLAPSE_KEY) === 'true'; }
+    function setGridCollapsed(v) { localStorage.setItem(COLLAPSE_KEY, v ? 'true' : 'false'); }
+    function getColCollapsed() { return localStorage.getItem(COL_COLLAPSE_KEY) === 'true'; }
+    function setColCollapsed(v) { localStorage.setItem(COL_COLLAPSE_KEY, v ? 'true' : 'false'); }
 
     // 그리드 헤더: [좋아요한 스토리(flex:1)] [접기▲] [컬렉션 담기]
-    // 검색창은 initSearchBar에서 탭 아래에 별도 삽입
     function initGridArea() {
-        // ID 기반 가드 — previousElementSibling 변동으로 인한 무한 재실행 방지
         if (document.getElementById('lf-toggle-btn')) return;
 
         const grid = document.querySelector(GRID_SEL);
         if (!grid) return;
 
-        // grid 이전 형제 중 h2를 포함한 헤더를 명시적으로 탐색
-        // (#lf-search-bar가 중간에 삽입된 경우에도 올바른 헤더를 찾음)
         let header = grid.previousElementSibling;
-        while (header && !header.querySelector('h2')) {
-            header = header.previousElementSibling;
-        }
+        while (header && !header.querySelector('h2')) header = header.previousElementSibling;
         if (!header) return;
 
         const h2 = header.querySelector('h2');
         if (h2) h2.style.flex = '1';
 
         const addLink = header.querySelector('a[href*="/collections/add"]');
-
-        // 접기 버튼
         const toggleBtn = document.createElement('button');
         toggleBtn.id = 'lf-toggle-btn';
         const collapsed = getGridCollapsed();
@@ -781,37 +655,42 @@
             toggleBtn.textContent = next ? '펼치기 ▼' : '접기 ▲';
         };
 
-        if (addLink) {
-            addLink.insertAdjacentElement('beforebegin', toggleBtn);
-        } else if (h2) {
-            h2.insertAdjacentElement('afterend', toggleBtn);
-        } else {
-            header.appendChild(toggleBtn);
-        }
+        if (addLink) addLink.insertAdjacentElement('beforebegin', toggleBtn);
+        else if (h2) h2.insertAdjacentElement('afterend', toggleBtn);
+        else header.appendChild(toggleBtn);
     }
 
-    // 탭 아래 고정 검색창 (항상 표시, #crk-liked-tabs 기준 sticky)
+    // 탭 아래 고정 검색창
+    // - #crk-liked-tabs 없을 경우 Radix [role="tablist"] 폴백
+    // - 탭 컨테이너([dir="ltr"])를 sticky로 만들어 탭바+검색바가 함께 고정
+    const TAB_STICKY_TOP = 56; // 플랫폼 nav bar 높이(px)
+
     function initSearchBar() {
         if (document.getElementById('lf-search-bar')) return;
 
-        const crkTab = document.getElementById('crk-liked-tabs');
+        const crkTab = document.getElementById('crk-liked-tabs')
+            ?? document.querySelector('#liked-scroll [role="tablist"]');
         if (!crkTab) return;
         const tabContainer = crkTab.closest('[dir="ltr"]') ?? crkTab.parentElement;
         if (!tabContainer) return;
+
+        // 탭 컨테이너 sticky 고정 (탭바와 검색창이 함께 붙어서 올라가도록)
+        tabContainer.style.position = 'sticky';
+        tabContainer.style.top = TAB_STICKY_TOP + 'px';
+        tabContainer.style.zIndex = '9';
+        tabContainer.style.background = 'var(--bg_screen, #fff)';
+        tabContainer.dataset.lfSticky = '1';
 
         const bar = document.createElement('div');
         bar.id = 'lf-search-bar';
         bar.innerHTML = `<input type="text" id="lf-search-input" class="lf-search-input"
             placeholder="작품 제목으로 검색...">`;
 
-        // 탭 컨테이너 바로 다음 형제로 삽입
         tabContainer.insertAdjacentElement('afterend', bar);
 
-        // sticky top = #crk-liked-tabs의 computed top + 높이
+        // 검색바 top = nav(56) + 탭바 높이
         function updateTop() {
-            const st = getComputedStyle(crkTab);
-            const tabTop = parseFloat(st.top) || 0;
-            bar.style.top = (tabTop + crkTab.offsetHeight) + 'px';
+            bar.style.top = (TAB_STICKY_TOP + crkTab.offsetHeight) + 'px';
         }
         updateTop();
         new ResizeObserver(updateTop).observe(crkTab);
@@ -821,13 +700,12 @@
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // §9. 검색
+    // §7. 검색
     // ─────────────────────────────────────────────────────────────────
     function applySearch(query) {
         const grid = document.querySelector(GRID_SEL);
         if (!grid) return;
 
-        // 검색어가 있으면 접힌 그리드 자동 펼침
         if (query && getGridCollapsed()) {
             setGridCollapsed(false);
             grid.style.display = '';
@@ -843,19 +721,17 @@
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // §10. React Fiber → storyId 추출
+    // §8. React Fiber → storyId 추출
     // ─────────────────────────────────────────────────────────────────
     function getIdFromFiber(el) {
         const fk = el && Object.keys(el).find(k =>
-            k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
-        );
+            k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance'));
         if (!fk) return null;
-        let fiber = el[fk];
-        let depth = 0;
+        let fiber = el[fk], depth = 0;
         while (fiber && depth++ < 50) {
             const p = fiber.memoizedProps;
             if (p && typeof p === 'object') {
-                for (const k of ['storyId', 'characterId', '_id', 'sourceId', 'id', 'contentId']) {
+                for (const k of ['storyId','characterId','_id','sourceId','id','contentId']) {
                     const v = p[k];
                     if (typeof v === 'string' && /^[a-f0-9]{24}$/.test(v)) return v;
                 }
@@ -866,7 +742,7 @@
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // §11. 컬렉션 캐시 관리
+    // §9. 컬렉션 캐시 관리
     // ─────────────────────────────────────────────────────────────────
     function addToColCache(colId, colName, storyId) {
         const key = COL_CACHE_PREFIX + colId;
@@ -881,7 +757,6 @@
         } catch {}
     }
 
-    // storyId → [{ colId, name, color }] 역방향 맵 생성
     function buildStoryToColMap() {
         const map = new Map();
         const layout = getLayout();
@@ -902,7 +777,7 @@
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // §12. 태그 배지 주입
+    // §10. 태그 배지 주입 (× 버튼 포함)
     // ─────────────────────────────────────────────────────────────────
     const TAG_ATTR = 'data-lf-tag-col';
 
@@ -917,6 +792,7 @@
             tagWrap.className = 'lf-tag-wrap';
             titleEl.insertAdjacentElement('afterend', tagWrap);
         }
+
         const badge = document.createElement('span');
         badge.className = 'lf-tag-badge';
         badge.setAttribute(TAG_ATTR, colId);
@@ -950,7 +826,6 @@
         tagWrap.appendChild(badge);
     }
 
-    // 좋아요 페이지: 캐시 기반으로 카드에 태그 주입
     function applyTagsToLikedCards() {
         const grid = document.querySelector(GRID_SEL);
         if (!grid) return;
@@ -962,15 +837,13 @@
             const storyId = getIdFromFiber(card);
             if (!storyId) return;
             const cols = storyMap.get(storyId);
-            if (cols?.length) {
-                cols.forEach(({ colId, name, color }) => injectTagBadge(card, colId, name, color));
-            }
+            if (cols?.length) cols.forEach(({ colId, name, color }) => injectTagBadge(card, colId, name, color));
             card.dataset.lfTagged = '1';
         });
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // §13. 컬렉션 페이지 캐싱
+    // §11. 컬렉션 페이지 캐싱
     // ─────────────────────────────────────────────────────────────────
     const COL_CARD_SEL = 'div.grid[class*="gap-y-10"] > div[role="button"]';
     let _colPageInited = false;
@@ -985,36 +858,30 @@
 
         const scrollEl = document.getElementById(`collection-${colId}-scroll`);
         const nameEl   = scrollEl?.querySelector('h1') ?? document.querySelector('h1');
-        if (!nameEl) return; // DOM 미준비
+        if (!nameEl) return;
 
         const colName = nameEl.textContent.trim();
 
-        // ── Fetch 인터셉터: 컬렉션 아이템 API 자동 감지 (Fiber 실패 대비) ──
         if (!window._lfFetchPatched) {
             window._lfFetchPatched = true;
             const _origFetch = window.fetch;
             window.fetch = async function (...args) {
                 const res = await _origFetch.apply(this, args);
                 const url = (typeof args[0] === 'string' ? args[0] : args[0]?.url) || '';
-                // content-collections/{id}/anything 패턴 감지
                 const fm = url.match(/content-collections\/([a-f0-9]{24})\/(\w+)/i);
                 if (fm) {
                     try {
                         const clone = res.clone();
                         const json  = await clone.json();
                         const fColId = fm[1];
-                        const fColNameEl = document.querySelector('h1');
-                        const fColName = fColNameEl?.textContent?.trim() || '';
-                        // 다양한 응답 구조 대응
+                        const fColName = document.querySelector('h1')?.textContent?.trim() || '';
                         const arr = Array.isArray(json?.data?.items) ? json.data.items
                             : Array.isArray(json?.data?.list)  ? json.data.list
                             : Array.isArray(json?.data)        ? json.data
                             : Array.isArray(json?.items)       ? json.items : [];
                         arr.forEach(item => {
                             const id = item._id || item.storyId || item.id || item.contentId;
-                            if (typeof id === 'string' && /^[a-f0-9]{24}$/.test(id)) {
-                                addToColCache(fColId, fColName, id);
-                            }
+                            if (typeof id === 'string' && /^[a-f0-9]{24}$/.test(id)) addToColCache(fColId, fColName, id);
                         });
                     } catch {}
                 }
@@ -1022,15 +889,13 @@
             };
         }
 
-        // ── Fiber 기반 카드 처리 ──
         function processCard(card) {
             if (card.dataset.lfColCached) return;
             const storyId = getIdFromFiber(card);
             if (!storyId) return;
             card.dataset.lfColCached = '1';
             addToColCache(colId, colName, storyId);
-            const color = getColColor(colId);
-            injectTagBadge(card, colId, colName, color);
+            injectTagBadge(card, colId, colName, getColColor(colId));
         }
 
         document.querySelectorAll(COL_CARD_SEL).forEach(processCard);
@@ -1043,36 +908,39 @@
                 else n.querySelectorAll?.(COL_CARD_SEL).forEach(processCard);
             }));
         });
-        const container = scrollEl ?? document.body;
-        _colPageObserver.observe(container, { childList: true, subtree: true });
+        (scrollEl ?? document.body).observe
+            ? _colPageObserver.observe(scrollEl ?? document.body, { childList: true, subtree: true })
+            : _colPageObserver.observe(document.body, { childList: true, subtree: true });
         _colPageInited = true;
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // §8. UI 초기화 / 정리
+    // §12. UI 정리
     // ─────────────────────────────────────────────────────────────────
     function cleanupUI() {
         document.getElementById('lf-col-section')?.remove();
         document.getElementById('lf-toggle-btn')?.remove();
         document.getElementById('lf-col-toggle-btn')?.remove();
         document.getElementById('lf-col-modal-overlay')?.remove();
-        document.getElementById('lf-search-btn')?.remove();
         document.getElementById('lf-search-bar')?.remove();
 
-        // 그리드 헤더 초기화 (h2 flex 복원)
+        // 탭 컨테이너 sticky 해제
+        const tabCont = document.querySelector('#liked-scroll [dir="ltr"][data-lf-sticky]');
+        if (tabCont) {
+            tabCont.style.position = '';
+            tabCont.style.top = '';
+            tabCont.style.zIndex = '';
+            tabCont.style.background = '';
+            delete tabCont.dataset.lfSticky;
+        }
+
         const grid = document.querySelector(GRID_SEL);
         if (grid) {
             let header = grid.previousElementSibling;
-            while (header && !header.querySelector('h2')) {
-                header = header.previousElementSibling;
-            }
-            if (header) {
-                const h2 = header.querySelector('h2');
-                if (h2) h2.style.flex = '';
-            }
+            while (header && !header.querySelector('h2')) header = header.previousElementSibling;
+            if (header) { const h2 = header.querySelector('h2'); if (h2) h2.style.flex = ''; }
         }
 
-        // 원본 캐러셀 섹션 복원
         const carouselSection = document.querySelector(CAROUSEL_SEL)?.closest('section');
         if (carouselSection) carouselSection.style.display = '';
 
@@ -1087,17 +955,14 @@
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // §9. checkAndRender + MutationObserver + setInterval
+    // §13. checkAndRender
     // ─────────────────────────────────────────────────────────────────
     let lastCardCount = 0;
     let colSectionBuilt = false;
     let debounceTimer = null;
 
     function checkAndRender() {
-        if (!window.location.pathname.startsWith('/liked')) {
-            cleanupUI();
-            return;
-        }
+        if (!window.location.pathname.startsWith('/liked')) { cleanupUI(); return; }
 
         // B: 컬렉션 그리드
         const carousel = document.querySelector(CAROUSEL_SEL);
@@ -1108,56 +973,57 @@
                 colSectionBuilt = true;
             }
         }
-        // 원본 캐러셀 숨김 재보장 (SPA 복귀 시 reconciliation 리셋 방어)
+        // 캐러셀 숨김 재보장 (SPA 복귀 시 reconciliation 리셋 방어)
         if (colSectionBuilt) {
             const cs = document.querySelector(CAROUSEL_SEL)?.closest('section');
             if (cs && cs.style.display !== 'none') cs.style.display = 'none';
         }
 
-        // C+검색: 그리드 헤더 접기 버튼 + 탭 아래 고정 검색창
+        // C+검색
         initGridArea();
         initSearchBar();
 
-        // D: 캐시 기반 태그 주입
+        // 탭 컨테이너 sticky 재보장 (reconciliation 리셋 방어)
+        const _tabCont = document.querySelector('#liked-scroll [dir="ltr"][data-lf-sticky]');
+        if (_tabCont && _tabCont.style.position !== 'sticky') {
+            _tabCont.style.position = 'sticky';
+            _tabCont.style.top = TAB_STICKY_TOP + 'px';
+            _tabCont.style.zIndex = '9';
+            _tabCont.style.background = 'var(--bg_screen, #fff)';
+        }
+
+        // D: 태그
         applyTagsToLikedCards();
 
-        // 카드 수 변화 감지 → 검색어 재적용
         const grid = document.querySelector(GRID_SEL);
         if (!grid) return;
 
         const cardCount = grid.querySelectorAll(CARD_SEL).length;
         if (cardCount !== lastCardCount) {
             lastCardCount = cardCount;
-            const searchInput = document.getElementById('lf-search-input');
-            if (searchInput?.value) applySearch(searchInput.value.toLowerCase().trim());
+            const inp = document.getElementById('lf-search-input');
+            if (inp?.value) applySearch(inp.value.toLowerCase().trim());
         }
 
-        // 접기 상태 재적용 (reconciliation 리셋 방어)
-        if (getGridCollapsed() && grid.style.display !== 'none') {
-            grid.style.display = 'none';
-        }
+        if (getGridCollapsed() && grid.style.display !== 'none') grid.style.display = 'none';
+
         const colSection = document.getElementById('lf-col-section');
         if (colSection && getColCollapsed()) {
             const rowsWrap = colSection.querySelector('.lf-col-rows');
-            if (rowsWrap && rowsWrap.style.display !== 'none') {
-                rowsWrap.style.display = 'none';
-            }
+            if (rowsWrap && rowsWrap.style.display !== 'none') rowsWrap.style.display = 'none';
         }
     }
 
     // ─────────────────────────────────────────────────────────────────
-    // 메인 루프 — SPA URL 변경을 매 tick에서 감지하여 분기
+    // 메인 루프 — SPA URL 감지
     // ─────────────────────────────────────────────────────────────────
     const COL_PAGE_RE = /^\/collections\/([a-f0-9]{24})$/i;
 
     function mainLoop() {
         const path = window.location.pathname;
-
         if (COL_PAGE_RE.test(path)) {
-            // 컬렉션 내부 페이지 (직접 접근 또는 SPA 네비게이션 모두 처리)
             initCollectionPageCaching();
         } else {
-            // 컬렉션 페이지에서 벗어난 경우 → 상태 리셋 (재진입 대비)
             if (_colPageInited) {
                 _colPageObserver?.disconnect();
                 _colPageObserver = null;
@@ -1165,11 +1031,8 @@
                 window._lfFetchPatched = false;
                 colSectionBuilt = false; // 복귀 시 컬렉션 UI 강제 재렌더
             }
-            if (path.startsWith('/liked')) {
-                checkAndRender();
-            } else {
-                cleanupUI();
-            }
+            if (path.startsWith('/liked')) checkAndRender();
+            else cleanupUI();
         }
     }
 
