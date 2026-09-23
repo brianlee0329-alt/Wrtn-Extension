@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         크랙 파피루스
-// @version      2.0.0
+// @version      2.0.1
 // @description  유저노트 프리셋 저장/불러오기 + 대화 프로필 폴더/접힘 관리 + 페르소나 이식
 // @match        https://crack.wrtn.ai/*
 // @require      https://cdn.jsdelivr.net/npm/dexie@4.2.1/dist/dexie.min.js#sha256-STeEejq7AcFOvsszbzgCDL82AjypbLLjD5O6tUByfuA=
@@ -1458,6 +1458,106 @@ function _makeThrottle(fn, wait) {
 
   function transplantInContext(root) { transplantPersonaRow(root); watchForRewire(root); }
 
+  // ── Radix 프로필 선택 드롭다운 순서 적용 ────────────────────────────
+
+  /**
+   * [role="option"] 엘리먼트에서 프로필 이름을 추출한다.
+   * 1순위: aria-labelledby → viewport 내 속성 선택자 (콜론 등 특수문자 안전)
+   * 2순위: option 내 마지막 <span> 텍스트 (폴백)
+   * @param {Element} option
+   * @param {Element} viewport
+   * @returns {string}
+   */
+  function extractOptionName(option, viewport) {
+    const labelId = option.getAttribute('aria-labelledby');
+    if (labelId) {
+      // document.getElementById 대신 속성 선택자 사용:
+      // radix-:r4e: 같은 콜론 포함 ID도 [id="..."] 형태에서는 안전하게 매칭됨
+      const nameEl = viewport.querySelector(`[id="${labelId}"]`);
+      const name = nameEl?.textContent?.trim() ?? '';
+      if (name) return name;
+    }
+    // 폴백: option 안 마지막 <span> (체크마크 아이콘 span 이후의 이름 span)
+    const spans = option.querySelectorAll('span');
+    return Array.from(spans).at(-1)?.textContent?.trim() ?? '';
+  }
+
+  /**
+   * Radix Select viewport 내 [role="option"] 에 CSS order를 주입하여
+   * meta의 folder.order / folderOrder 기반 정렬을 드롭다운에 반영한다.
+   * @param {Element} viewport
+   */
+  function tryApplyOrderToProfileDropdown(viewport) {
+    const meta = loadMeta();
+    if (!meta.profiles.length) return;
+
+    const options = Array.from(viewport.querySelectorAll('[role="option"]'));
+    if (options.length < 2) return;
+
+    // 이름 추출 + 프로필 드롭다운 여부 판별 (2개 이상 일치 시 적용)
+    /** @type {Map<Element, string>} */
+    const nameMap = new Map();
+    let matchCount = 0;
+    for (const opt of options) {
+      const name = extractOptionName(opt, viewport);
+      nameMap.set(opt, name);
+      if (name && meta.profiles.some(p => p.name === name)) matchCount++;
+    }
+    if (matchCount < 2) return;
+
+    // meta 기준 정렬 인덱스 계산
+    const sorted = [...meta.profiles].sort((a, b) => {
+      const fa = meta.folders.find(f => f.id === a.folderId);
+      const fb = meta.folders.find(f => f.id === b.folderId);
+      const oa = (fa?.order ?? 999) * 1000 + (a.folderOrder ?? 0);
+      const ob = (fb?.order ?? 999) * 1000 + (b.folderOrder ?? 0);
+      return oa - ob;
+    });
+
+    // viewport를 flex-col 컨테이너로 전환 → CSS order 활성화
+    // @ts-ignore
+    viewport.style.display = 'flex';
+    // @ts-ignore
+    viewport.style.flexDirection = 'column';
+
+    for (const [opt, name] of nameMap) {
+      const idx = sorted.findIndex(p => p.name === name);
+      // @ts-ignore
+      opt.style.order = String(idx === -1 ? 9999 : idx);
+    }
+  }
+
+  /**
+   * document.body 전체 하위 변화를 감시(subtree: true).
+   *
+   * subtree: true 이유:
+   *  - Radix 포털이 body 직계 자식이 아닌 중간 컨테이너 안에 있을 때 대응
+   *  - React 18 concurrent 렌더링에서 wrapper가 먼저(빈 채로) 삽입된 뒤
+   *    viewport/option이 다음 마이크로태스크에 채워지는 경우 대응
+   *    (subtree: true면 viewport 삽입 자체를 별도로 포착)
+   *
+   * 성능: 추가된 노드가 HTMLElement가 아니면 즉시 continue; viewport 탐색도
+   *   속성 선택자 한 번으로 끝나므로 실질적 부하는 경미하다.
+   */
+  function watchRadixProfileDropdown() {
+    new MutationObserver(mutations => {
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (!(node instanceof HTMLElement)) continue;
+
+          // Case 1: viewport 노드 자체가 삽입됨
+          if (node.hasAttribute('data-radix-select-viewport')) {
+            tryApplyOrderToProfileDropdown(node); continue;
+          }
+
+          // Case 2: 추가된 노드 내부에 viewport가 이미 존재
+          const vp = node.querySelector('[data-radix-select-viewport]');
+          if (vp) tryApplyOrderToProfileDropdown(vp);
+        }
+      }
+    }).observe(document.body, { childList: true, subtree: true });
+  }
+
   // ── inject + Observer ──────────────────────────────────────────────
   let _injectRunning = false;
 
@@ -1485,6 +1585,9 @@ function _makeThrottle(fn, wait) {
   const webModal = document.getElementById('web-modal');
   if (webModal) new MutationObserver(() => inject()).observe(webModal, { childList: true, subtree: true, attributes: true });
   new MutationObserver(() => inject()).observe(document.body, { childList: true, subtree: false });
+
+  // Radix 프로필 선택 드롭다운 순서 반영 시작
+  watchRadixProfileDropdown();
 
   // rAF 루프 (§1과 오프셋: 1500ms 지연)
   let _lastInjectTime = 0;
