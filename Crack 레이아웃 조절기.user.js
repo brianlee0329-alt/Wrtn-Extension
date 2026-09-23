@@ -120,39 +120,45 @@
     window.addEventListener('DOMContentLoaded', injectAntiScrollStyle);
 
     // 모델 선택창의 동적 생성 변화를 감지하고 레이아웃을 재배치하는 함수
-    // (v1.6.3: 플랫폼이 이 모달을 Radix Select → cmdk 콤보박스로 교체.
-    //  data-radix-select-viewport 속성이 완전히 사라짐 → 항상 0건 매칭되어
-    //  전체 기능이 무효화된 상태였음.
-    //  새 구조: [cmdk-list-sizer](옵션 직계 부모, 구 viewport 역할)
-    //         → .closest('[role="dialog"]')가 바깥 박스(구 content 역할, 폭/높이 대상)
-    //  ※ role="listbox"는 이제 cmdk-list(바깥 박스의 자식)로 이동해 더 이상
-    //    바깥 박스를 가리키지 않음 — role="dialog"로 교체
-    //  ※ 바깥 박스 높이가 max-height(450px)가 아닌 실제 height(h-[min(569px,...)])로
-    //    바뀜 — 접힘 상태는 인라인 스타일을 비워 클래스 값이 그대로 적용되게 하고,
-    //    펼침 상태만 height를 직접 지정
-    //  ⚠ cmdk-list-sizer는 cmdk 라이브러리의 범용 마커라 플랫폼 내 다른 cmdk 기반
-    //    콤보박스(검색창 등)에도 쓰일 수 있음 — 다른 곳에서 오작동하면 알려줘
+    // (v1.6.4: cmdk 콤보박스에서 다시 개편 — cmdk-* 속성과 role="option"이 모두
+    //  사라지고, 그냥 <div class="flex flex-col"> 안에 <button> 12개가 나란히
+    //  들어있는 형태로 단순화됨(role="dialog"만 남음). cmdk-list-sizer selector가
+    //  0건 매칭되어 전체 기능이 다시 무효화된 상태였음.
+    //  새 구조: role="dialog"(바깥 박스, 폭/높이 대상) 직계 자식 div.flex.flex-col
+    //         (옵션 직계 부모, 구 viewport/sizer 역할) 안에 <button> 12개
+    //  ⚠ role="dialog"는 플랫폼에 흔해서, 모델 카드 특유의
+    //    img[src*="model-icon/"] 아이콘이 전부 있는 컨테이너인지 확인해서만
+    //    동작하도록 판별 조건을 추가함 (다른 팝오버 오작동 방지)
+    //  ※ 신규 모델 추가(하이퍼챗 4.0)로 총 11→12개로 늘었으나 키워드 분류
+    //    로직('하이퍼' 포함 매칭)은 그대로 커버됨 — 변경 불필요)
     const adjustModelModalLayout = () => {
-        const sizers = document.querySelectorAll('[cmdk-list-sizer]');
+        const dialogs = document.querySelectorAll('div[role="dialog"]');
 
-        sizers.forEach(sizer => {
+        dialogs.forEach(content => {
+            const container = content.querySelector(':scope > div.flex.flex-col');
+            if (!container) return;
+
             // 무한 루프를 방지하기 위해 이미 처리된 요소는 건너뜁니다.
-            if (sizer.dataset.customLayoutApplied) return;
+            if (container.dataset.customLayoutApplied) return;
+
+            const options = Array.from(container.querySelectorAll(':scope > button'));
+            if (options.length === 0) return;
+
+            // 모델 선택 모달인지 판별: 모든 버튼이 모델 아이콘을 갖고 있어야 함
+            const isModelModal = options.every(btn => btn.querySelector('img[src*="model-icon/"]'));
+            if (!isModelModal) return;
 
             // 1. 위치 버그 해결: 최상위 래퍼가 아닌 '내부 컨텐츠'의 너비를 늘립니다.
-            const content = sizer.closest('[role="dialog"]');
-            if (content) {
-                content.style.position = 'relative'; // 확장 버튼 절대배치 기준점 확보
-                content.style.width = '850px'; // 3열을 수용할 충분한 너비
-                content.style.maxWidth = '90vw'; // 화면을 벗어나지 않도록 제한
-            }
+            content.style.position = 'relative'; // 확장 버튼 절대배치 기준점 확보
+            content.style.width = '850px'; // 3열을 수용할 충분한 너비
+            content.style.maxWidth = '90vw'; // 화면을 벗어나지 않도록 제한
 
             // 2. CSS Grid 활성화
-            sizer.style.display = 'grid';
-            sizer.style.gridTemplateColumns = 'repeat(3, 1fr)';
-            sizer.style.gap = '8px';
-            sizer.style.padding = '10px';
-            sizer.style.alignItems = 'start';
+            container.style.display = 'grid';
+            container.style.gridTemplateColumns = 'repeat(3, 1fr)';
+            container.style.gap = '8px';
+            container.style.padding = '10px';
+            container.style.alignItems = 'start';
 
             // 3. 열 제목(헤더) 추가 함수
             const addHeader = (text, col) => {
@@ -165,19 +171,17 @@
                 header.style.paddingBottom = '5px';
                 header.style.marginBottom = '5px';
                 header.className = 'custom-grid-header';
-                sizer.appendChild(header);
+                container.appendChild(header);
             };
 
             // 헤더가 중복 생성되지 않도록 검사 후 삽입
-            if (!sizer.querySelector('.custom-grid-header')) {
+            if (!container.querySelector('.custom-grid-header')) {
                 addHeader('하이엔드', '1');
                 addHeader('스탠다드', '2');
                 addHeader('엔트리', '3');
             }
 
             // 4. 모델 텍스트 기반 카테고리 분류 및 배치
-            const options = Array.from(sizer.querySelectorAll('[role="option"]'));
-
             // 각 열(Column)별로 항목이 들어갈 행(Row) 번호를 추적합니다. (1행은 헤더)
             let highEndRow = 2, standardRow = 2, entryRow = 2, unclassifiedRow = 2;
 
@@ -208,7 +212,7 @@
             });
 
             // 5. 상하 길이 확장 토글 버튼 삽입 (content당 1회만)
-            if (content && !content.querySelector('.ck-model-expand-btn')) {
+            if (!content.querySelector('.ck-model-expand-btn')) {
                 const expandBtn = document.createElement('button');
                 expandBtn.type = 'button';
                 expandBtn.className = 'ck-model-expand-btn';
@@ -245,7 +249,7 @@
             }
 
             // 처리가 완료되었음을 표시
-            sizer.dataset.customLayoutApplied = 'true';
+            container.dataset.customLayoutApplied = 'true';
         });
     };
 
