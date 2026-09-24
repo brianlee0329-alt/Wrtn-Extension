@@ -146,6 +146,20 @@ HTML 렌더링 지원과의 충돌 문제 해결
 ## V3.0.1
 폴더간 카테고리 기능 및 작품 목록/폴더 목록 접기 기능 추가
 
+폴더간 태그 삽입
+
+## V3.0.2
+태그 오염 수정
+
+이미 오염되었다면 관리자 모드(F12)로 콘솔에 들어가 다음을 입력하세요.
+
+```
+// crk-col-cache:: 로 시작하는 키 전부 삭제
+Object.keys(localStorage)
+    .filter(k => k.startsWith('crk-col-cache::'))
+    .forEach(k => localStorage.removeItem(k));
+```
+
 # 채팅 세션 관리
 ## V2.0.0
 사이드바 채팅 세션 검색(제목&메모 식별)·폴더·메모 기능 제공
