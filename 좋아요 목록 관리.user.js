@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         좋아요 목록 관리
 // @namespace    https://github.com/workforomg/Util
-// @version      3.0.1
+// @version      3.0.2
 // @description  컬렉션 전체 표시 / 좋아요 목록 접기 / 작품 검색 / 컬렉션 태그
 // @match        https://crack.wrtn.ai/liked*
 // @match        https://crack.wrtn.ai/collections/*
@@ -865,8 +865,11 @@
         if (!window._lfFetchPatched) {
             window._lfFetchPatched = true;
             const _origFetch = window.fetch;
+            window._lfOrigFetch = _origFetch;          // ← 추가: 복원용으로 저장
             window.fetch = async function (...args) {
                 const res = await _origFetch.apply(this, args);
+                // ↓ 추가: 컬렉션 페이지가 아니면 아무것도 캐시하지 않음
+                if (!COL_PAGE_RE.test(window.location.pathname)) return res;
                 const url = (typeof args[0] === 'string' ? args[0] : args[0]?.url) || '';
                 const fm = url.match(/content-collections\/([a-f0-9]{24})\/(\w+)/i);
                 if (fm) {
@@ -876,9 +879,9 @@
                         const fColId = fm[1];
                         const fColName = document.querySelector('h1')?.textContent?.trim() || '';
                         const arr = Array.isArray(json?.data?.items) ? json.data.items
-                            : Array.isArray(json?.data?.list)  ? json.data.list
-                            : Array.isArray(json?.data)        ? json.data
-                            : Array.isArray(json?.items)       ? json.items : [];
+                        : Array.isArray(json?.data?.list)  ? json.data.list
+                        : Array.isArray(json?.data)        ? json.data
+                        : Array.isArray(json?.items)       ? json.items : [];
                         arr.forEach(item => {
                             const id = item._id || item.storyId || item.id || item.contentId;
                             if (typeof id === 'string' && /^[a-f0-9]{24}$/.test(id)) addToColCache(fColId, fColName, id);
@@ -890,6 +893,8 @@
         }
 
         function processCard(card) {
+            // ↓ 추가: 컬렉션 페이지를 벗어난 순간 observer 콜백이 와도 무시
+            if (!COL_PAGE_RE.test(window.location.pathname)) return;
             if (card.dataset.lfColCached) return;
             const storyId = getIdFromFiber(card);
             if (!storyId) return;
@@ -1028,8 +1033,12 @@
                 _colPageObserver?.disconnect();
                 _colPageObserver = null;
                 _colPageInited = false;
+                if (window._lfOrigFetch) {                 // ← 추가: 원본 fetch 복원
+                    window.fetch = window._lfOrigFetch;
+                    window._lfOrigFetch = null;
+                }
                 window._lfFetchPatched = false;
-                colSectionBuilt = false; // 복귀 시 컬렉션 UI 강제 재렌더
+                colSectionBuilt = false;
             }
             if (path.startsWith('/liked')) checkAndRender();
             else cleanupUI();
