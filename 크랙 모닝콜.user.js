@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 모닝콜
 // @namespace    https://crack.wrtn.ai/
-// @version      2.0.9
+// @version      2.0.10
 // @description  Radiosonde IGX 서버 점수 뷰어 + 알림 감지 + 요약 메모리 감지 (알림 패널 통합 빌드)
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_xmlhttpRequest
@@ -323,7 +323,7 @@ function rsFireAlert(info, oldTps, newTps, score, prevScore) {
   rsLog.unshift({
     time : new Date().toLocaleTimeString('ko-KR', { hour:'2-digit', minute:'2-digit' }),
     slug : info.slug, label: info.label,
-    old  : oldTps, cur: newTps, drop: newTps < oldTps,
+    old  : oldTps, cur: newTps, drop: score < prevScore,
     score, prevScore,
   });
   if (rsLog.length > 50) rsLog.length = 50;
@@ -359,8 +359,12 @@ async function rsPoll() {
 
       if (prev && cfgWatched.has(info.slug)) {
         if (score !== null && prevScore !== null) {
-          const scoreDeltaPct = Math.abs(score - prevScore) / (prevScore || 1);
-          const deltaAlert = scoreDeltaPct >= cfgThresh;
+          // [핵심 수정] 분모를 prevScore 가 아닌 100 으로 고정.
+          // (prevScore||1) 사용 시 저점수 모델(0–10점)에서 분모가 극소화돼
+          // 사소한 변화도 수백%로 부풀려 항상 발화하는 버그.
+          // 100 으로 나누면 cfgThresh=0.10 이 "10포인트 이상 변화" 의미.
+          const scoreAbsDelta = Math.abs(score - prevScore);
+          const deltaAlert = scoreAbsDelta / 100 >= cfgThresh;
           const dropAlert  = cfgMinScore > 0
             && score    <  cfgMinScore
             && prevScore >= cfgMinScore;
@@ -577,7 +581,7 @@ function rsRenderSettings() {
         <input type="range" id="crs-sl-thresh" min="5" max="50" step="5" value="${threshPct}">
         <span class="crs-cs-val" id="crs-sl-thresh-val">${threshPct}%</span>
       </div>
-      <div class="crs-cs-note">TPS가 이전 측정 대비 이 비율 이상 변할 때 배지를 표시합니다.</div>
+      <div class="crs-cs-note">점수(0–100)가 이 값 이상 절대 변화(포인트)할 때 배지를 표시합니다.<br>예: 20% → 20포인트 이상 변화 시 발화.</div>
     </div>
 
     <!-- 절대 최저 점수 -->
