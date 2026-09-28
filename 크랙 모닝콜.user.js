@@ -366,9 +366,15 @@ async function rsPoll() {
           const scoreAbsDelta = Math.abs(score - prevScore);
           const deltaAlert = scoreAbsDelta / 100 >= cfgThresh;
           const dropAlert  = cfgMinScore > 0
-            && score    <  cfgMinScore
+            && score     <  cfgMinScore
             && prevScore >= cfgMinScore;
-          if (deltaAlert || dropAlert) {
+
+          // ↓ 추가: 임계값 하향에서 상향으로 회복 시 발화
+          const riseAlert  = cfgMinScore > 0
+            && score     >= cfgMinScore
+            && prevScore <  cfgMinScore;
+
+          if (deltaAlert || dropAlert || riseAlert) {
             rsFireAlert(info, prev.tps, stat.tps, score, prevScore);
           }
         }
