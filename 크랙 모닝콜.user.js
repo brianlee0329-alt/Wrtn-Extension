@@ -9,6 +9,7 @@
 // @grant        GM_setValue
 // @grant        GM_addStyle
 // @grant        unsafeWindow
+// @connect      rs.igx.kr
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -22,6 +23,12 @@ const RS_POLL_MS = 5 * 60 * 1000;
 const RS_GOOD_TPS = 20;
 const RS_WARN_TPS = 10;
 
+// ── 구버전(Old HTML) 점수 공식 임계값 ─────────────────────
+// latency·TPS 각 50점 만점, 합산 100점 기준.
+// latency > 7000ms 또는 tps < WORST 이면 총점 40 상한 적용.
+const RS_SCORE_TPS = { BEST: 33.0, NORMAL: 17.5, WORST: 10.0 };
+const RS_SCORE_LAT = { BEST: 2000,  NORMAL: 3500,  WORST: 7000 }; // ms
+
 const RS_MODELS = [
   // Anthropic
   { slug: 'claude-fable-5.1', label: 'Claude Fable 5.1', short: 'F5.1'},
@@ -30,6 +37,7 @@ const RS_MODELS = [
   { slug: 'claude-opus-4.8', label: 'Claude Opus 4.8', short: 'O4.8'},
   { slug: 'claude-opus-4.7', label: 'Claude Opus 4.7', short: 'O4.7'},
   { slug: 'claude-opus-4.6', label: 'Claude Opus 4.6', short: 'O4.6'},
+  { slug: 'claude-sonnet-5.5', label: 'Claude Sonnet 5.5', short: 'S5.5'},
   { slug: 'claude-sonnet-5', label: 'Claude Sonnet 5', short: 'S5'},
   // Google
   { slug: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview', short: 'G3.1'},
@@ -265,7 +273,7 @@ function rsFetchPage() {
 }
 
 /** 최근 5건(정상) 평균 TPS·latency + 스파크라인용 최근 30건 TPS
- *  score 는 rsExtractScores() 가 HTML 카드에서 직접 읽어 별도 주입.
+ *  score 는 rsCalcScore() 가 구버전 공식으로 tps·latency 에서 직접 산출.
  */
 function rsCompute(stats) {
   const ok = stats.filter(s => s.failure === 0 && typeof s.tps === 'number' && !isNaN(s.tps));
@@ -280,16 +288,50 @@ function rsCompute(stats) {
 }
 
 /**
- * 렌더링된 HTML 카드에서 모델별 실제 점수 추출.
- *   <span class="card-score-data svelte-...">81</span>  → 0–100 정수
- * 데이터 블롭의 model: 순서와 카드 렌더 순서가 일치함을 이용해 zip.
+ * IGX Radiosonde 구버전(Old HTML) 점수 공식 재현.
+ *
+ * 배경: 신버전 SvelteKit 페이지는 점수를 클라이언트 하이드레이션 단계에서만
+ * 렌더링하므로 GM_xmlhttpRequest 로 받는 초기 HTML 응답에 card-score-data
+ * 요소가 포함되지 않아 HTML 스크래핑 방식이 전면 실패.
+ * 대안: data:{providers:…} 블롭에서 이미 정상 취득 중인 tps/latency 값에
+ * 구버전 공식을 직접 적용해 점수를 로컬 산출한다.
+ *
+ * 공식 출처: IGX Radiosonde Old HTML score() / score_legacy() 메서드
+ *   LATENCY 점수 (0–50):
+ *     ≤ BEST(2000ms)  → 50
+ *     ≤ NORMAL(3500ms)→ map(lat, 2000, 3500, 50, 30)
+ *     ≤ WORST(7000ms) → map(lat, 3500, 7000, 30,  0)
+ *     > WORST         → 0
+ *   TPS 점수 (0–50):
+ *     ≥ BEST(33)   → 50
+ *     ≥ NORMAL(17.5)→ map(tps, 17.5, 33,   30, 50)
+ *     ≥ WORST(10)  → map(tps, 10,   17.5,  10, 30)
+ *     < WORST      → map(tps,  0,   10,     0, 10)
+ *   합산 패널티: lat > 7000 또는 tps < 10 이면 min(40, total) 상한.
+ *   최종: Math.min(100, Math.max(0, round(total)))
  */
-function rsExtractScores(html) {
-  const slugs  = [...html.matchAll(/model:"([^"]+)"/g)].map(m => m[1]);
-  const scores = [...html.matchAll(/card-score-data[^>]*?>(\d+)<\/span>/g)].map(m => +m[1]);
-  const map = {};
-  slugs.forEach((s, i) => { if (scores[i] !== undefined) map[s] = scores[i]; });
-  return map;                // { slug: score(0-100), ... }
+function rsScoreMap(v, iMin, iMax, oMin, oMax) {
+  return ((v - iMin) * (oMax - oMin)) / (iMax - iMin) + oMin;
+}
+
+function rsCalcScore(tps, latency) {
+  if (!tps || !latency) return 0;                 // isFullyFailed() 등가
+  const T = RS_SCORE_TPS, L = RS_SCORE_LAT;
+
+  let lScore = 0;
+  if      (latency <= L.BEST)   lScore = 50;
+  else if (latency <= L.NORMAL) lScore = rsScoreMap(latency, L.BEST,   L.NORMAL, 50, 30);
+  else if (latency <= L.WORST)  lScore = rsScoreMap(latency, L.NORMAL, L.WORST,  30,  0);
+
+  let tScore = 0;
+  if      (tps >= T.BEST)   tScore = 50;
+  else if (tps >= T.NORMAL) tScore = rsScoreMap(tps, T.NORMAL, T.BEST,   30, 50);
+  else if (tps >= T.WORST)  tScore = rsScoreMap(tps, T.WORST,  T.NORMAL, 10, 30);
+  else                      tScore = rsScoreMap(tps, 0,        T.WORST,   0, 10);
+
+  const total = lScore + tScore;
+  if (latency > L.WORST || tps < T.WORST) return Math.min(40, total);
+  return Math.min(100, Math.max(0, total));
 }
 
 function rsTpsClass(tps) {
@@ -342,8 +384,6 @@ async function rsPoll() {
   const data = rsEvalObj(jsStr);
   if (!data?.statistics) { console.warn('[MCAL] RS 파싱 실패'); return; }
 
-  const scoreMap = rsExtractScores(html);
-
   for (const grp of data.statistics) {
     for (const m of (grp.models ?? [])) {
       const info = RS_MODELS.find(r => r.slug === m.model);
@@ -351,7 +391,7 @@ async function rsPoll() {
       const stat = rsCompute(m.statistics ?? []);
       if (!stat) continue;
 
-      const score = scoreMap[info.slug] ?? null;
+      const score = rsCalcScore(stat.tps, stat.latency);
       const prev  = rsCache[info.slug];
       rsCache[info.slug] = { ...stat, score, updatedAt: Date.now() };
 
@@ -527,7 +567,7 @@ function rsRenderModels() {
       }
       const st = document.createElement('span');
       st.className = 'crs-mr-stat ' + rsTpsClass(c.tps);
-      st.innerHTML  = `<b>${c.score}</b>&thinsp;<span style="opacity:.55;font-size:10.5px">${c.tps}&nbsp;tok/s&nbsp;·&nbsp;${(c.latency/1000).toFixed(1)}s</span>`;
+      st.innerHTML  = `<b>${c.score.toFixed(2)}</b>&thinsp;<span style="opacity:.55;font-size:10.5px">${c.tps}&nbsp;tok/s&nbsp;·&nbsp;${(c.latency/1000).toFixed(1)}s</span>`;
       row.appendChild(st);
     } else {
       const st = document.createElement('span');
@@ -561,7 +601,7 @@ function rsRenderLog() {
   }
   body.innerHTML = rsLog.map(e => {
     const sc = (e.prevScore != null && e.score != null)
-      ? `&thinsp;<span style="opacity:.55">(${e.prevScore}→${e.score}점)</span>` : '';
+      ? `&thinsp;<span style="opacity:.55">(${e.prevScore.toFixed(2)}→${e.score.toFixed(2)}점)</span>` : '';
     return `<div class="crs-le">
       <span class="crs-lt">${e.time}</span>
       <span class="${e.drop ? 'crs-ld' : 'crs-lu'}">
