@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         크랙 모닝콜
 // @namespace    https://crack.wrtn.ai/
-// @version      2.0.10
+// @version      2.1.0
 // @description  Radiosonde IGX 서버 점수 뷰어 + 알림 감지 + 요약 메모리 감지 (알림 패널 통합 빌드)
 // @match        https://crack.wrtn.ai/*
 // @grant        GM_xmlhttpRequest
@@ -24,8 +24,6 @@ const RS_GOOD_TPS = 20;
 const RS_WARN_TPS = 10;
 
 // ── 구버전(Old HTML) 점수 공식 임계값 ─────────────────────
-// latency·TPS 각 50점 만점, 합산 100점 기준.
-// latency > 7000ms 또는 tps < WORST 이면 총점 40 상한 적용.
 const RS_SCORE_TPS = { BEST: 33.0, NORMAL: 17.5, WORST: 10.0 };
 const RS_SCORE_LAT = { BEST: 2000,  NORMAL: 3500,  WORST: 7000 }; // ms
 
@@ -59,7 +57,6 @@ const RS_MODELS = [
 //  ② 설정 (GM 영속)
 // ════════════════════════════════════════════════════════════
 const CFG = {
-  THRESH    : 'mcal:thresh',
   WATCHED   : 'mcal:watched',
   GRAPH     : 'mcal:graph',
   MIN_SCORE : 'mcal:minscore',
@@ -67,7 +64,6 @@ const CFG = {
   VOL       : 'mcal:vol',       // 비프음 볼륨 0.05–1.0
 };
 
-let cfgThresh    = GM_getValue(CFG.THRESH,     0.20);
 let cfgGraph     = GM_getValue(CFG.GRAPH,      true);
 let cfgMinScore  = GM_getValue(CFG.MIN_SCORE,  0);
 let cfgBeep      = GM_getValue(CFG.BEEP,       true);
@@ -77,7 +73,6 @@ let cfgWatched   = new Set(
 );
 
 function cfgSave() {
-  GM_setValue(CFG.THRESH,     cfgThresh);
   GM_setValue(CFG.GRAPH,      cfgGraph);
   GM_setValue(CFG.MIN_SCORE,  cfgMinScore);
   GM_setValue(CFG.BEEP,       cfgBeep);
@@ -296,26 +291,24 @@ function rsCompute(stats) {
  * 대안: data:{providers:…} 블롭에서 이미 정상 취득 중인 tps/latency 값에
  * 구버전 공식을 직접 적용해 점수를 로컬 산출한다.
  *
- * 공식 출처: IGX Radiosonde Old HTML score() / score_legacy() 메서드
- *   LATENCY 점수 (0–50):
- *     ≤ BEST(2000ms)  → 50
- *     ≤ NORMAL(3500ms)→ map(lat, 2000, 3500, 50, 30)
- *     ≤ WORST(7000ms) → map(lat, 3500, 7000, 30,  0)
- *     > WORST         → 0
- *   TPS 점수 (0–50):
- *     ≥ BEST(33)   → 50
- *     ≥ NORMAL(17.5)→ map(tps, 17.5, 33,   30, 50)
- *     ≥ WORST(10)  → map(tps, 10,   17.5,  10, 30)
- *     < WORST      → map(tps,  0,   10,     0, 10)
- *   합산 패널티: lat > 7000 또는 tps < 10 이면 min(40, total) 상한.
- *   최종: Math.min(100, Math.max(0, round(total)))
+ * LATENCY 점수 (0–50):
+ *   ≤ BEST(2000ms)   → 50
+ *   ≤ NORMAL(3500ms) → map(lat, 2000, 3500, 50, 30)
+ *   ≤ WORST(7000ms)  → map(lat, 3500, 7000, 30,  0)
+ *   > WORST          → 0
+ * TPS 점수 (0–50):
+ *   ≥ BEST(33)    → 50
+ *   ≥ NORMAL(17.5)→ map(tps, 17.5, 33,   30, 50)
+ *   ≥ WORST(10)   → map(tps, 10,   17.5, 10, 30)
+ *   < WORST       → map(tps,  0,   10,    0, 10)
+ * 패널티: lat > 7000 또는 tps < 10 이면 min(40, total) 상한.
  */
 function rsScoreMap(v, iMin, iMax, oMin, oMax) {
   return ((v - iMin) * (oMax - oMin)) / (iMax - iMin) + oMin;
 }
 
 function rsCalcScore(tps, latency) {
-  if (!tps || !latency) return 0;                 // isFullyFailed() 등가
+  if (!tps || !latency) return 0;
   const T = RS_SCORE_TPS, L = RS_SCORE_LAT;
 
   let lScore = 0;
@@ -330,8 +323,8 @@ function rsCalcScore(tps, latency) {
   else                      tScore = rsScoreMap(tps, 0,        T.WORST,   0, 10);
 
   const total = lScore + tScore;
-  if (latency > L.WORST || tps < T.WORST) return Math.min(40, total);
-  return Math.min(100, Math.max(0, total));
+  if (latency > L.WORST || tps < T.WORST) return +Math.min(40, total).toFixed(2);
+  return +Math.min(100, Math.max(0, total)).toFixed(2);
 }
 
 function rsTpsClass(tps) {
@@ -399,22 +392,10 @@ async function rsPoll() {
 
       if (prev && cfgWatched.has(info.slug)) {
         if (score !== null && prevScore !== null) {
-          // [핵심 수정] 분모를 prevScore 가 아닌 100 으로 고정.
-          // (prevScore||1) 사용 시 저점수 모델(0–10점)에서 분모가 극소화돼
-          // 사소한 변화도 수백%로 부풀려 항상 발화하는 버그.
-          // 100 으로 나누면 cfgThresh=0.10 이 "10포인트 이상 변화" 의미.
-          const scoreAbsDelta = Math.abs(score - prevScore);
-          const deltaAlert = scoreAbsDelta / 100 >= cfgThresh;
-          const dropAlert  = cfgMinScore > 0
-            && score     <  cfgMinScore
-            && prevScore >= cfgMinScore;
-
-          // ↓ 추가: 임계값 하향에서 상향으로 회복 시 발화
-          const riseAlert  = cfgMinScore > 0
-            && score     >= cfgMinScore
-            && prevScore <  cfgMinScore;
-
-          if (deltaAlert || dropAlert || riseAlert) {
+          // 점수가 최저 임계값을 하향·상향 통과할 때만 발화
+          const dropAlert = cfgMinScore > 0 && score     <  cfgMinScore && prevScore >= cfgMinScore;
+          const riseAlert = cfgMinScore > 0 && score     >= cfgMinScore && prevScore <  cfgMinScore;
+          if (dropAlert || riseAlert) {
             rsFireAlert(info, prev.tps, stat.tps, score, prevScore);
           }
         }
@@ -617,19 +598,7 @@ function rsRenderSettings() {
   const body = document.getElementById('crs-api-body');
   if (!body) return;
 
-  const threshPct = Math.round(cfgThresh * 100);
-
   body.innerHTML = `
-    <!-- 변화율 임계값 -->
-    <div class="crs-cs">
-      <div class="crs-cs-label">변화율 알림 임계값</div>
-      <div class="crs-cs-row">
-        <input type="range" id="crs-sl-thresh" min="5" max="50" step="5" value="${threshPct}">
-        <span class="crs-cs-val" id="crs-sl-thresh-val">${threshPct}%</span>
-      </div>
-      <div class="crs-cs-note">점수(0–100)가 이 값 이상 절대 변화(포인트)할 때 배지를 표시합니다.<br>예: 20% → 20포인트 이상 변화 시 발화.</div>
-    </div>
-
     <!-- 절대 최저 점수 -->
     <div class="crs-cs">
       <div class="crs-cs-label">최저 점수 임계값</div>
@@ -637,7 +606,7 @@ function rsRenderSettings() {
         <input type="range" id="crs-sl-minscore" min="0" max="100" step="5" value="${cfgMinScore}">
         <span class="crs-cs-val" id="crs-sl-minscore-val">${cfgMinScore || '꺼짐'}</span>
       </div>
-      <div class="crs-cs-note">Radiosonde 실제 점수(0–100)가 이 값 아래로 내려가면 배지를 표시합니다. 0 = 비활성.</div>
+      <div class="crs-cs-note">산출 점수(0–100)가 이 값 아래로 내려가거나 회복될 때 배지를 표시합니다. 0 = 비활성.</div>
     </div>
 
     <!-- 스파크라인 -->
@@ -662,7 +631,7 @@ function rsRenderSettings() {
         ).join('')}
       </div>
       <div class="crs-cs-note" style="margin-top:5px">
-        체크 해제된 모델은 변화율 감지에서 제외됩니다 (모델 탭에는 계속 표시).
+        체크 해제된 모델은 점수 임계값 감시에서 제외됩니다 (모델 탭에는 계속 표시).
       </div>
     </div>
 
@@ -688,13 +657,6 @@ function rsRenderSettings() {
       </div>
     </div>
   `;
-
-  document.getElementById('crs-sl-thresh').addEventListener('input', e => {
-    const v = parseInt(e.target.value);
-    document.getElementById('crs-sl-thresh-val').textContent = v + '%';
-    cfgThresh = v / 100;
-    cfgSave();
-  });
 
   document.getElementById('crs-sl-minscore').addEventListener('input', e => {
     const v = parseInt(e.target.value);
