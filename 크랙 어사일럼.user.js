@@ -1734,8 +1734,25 @@
   // ════════════════════════════════════════════════════════════
   //  요약 메모리 모달 내 검색
   // ════════════════════════════════════════════════════════════
+  // 검색 대상 목록 컨테이너 (기존 overflow-y-auto 우선, 없으면 Virtuoso scroller 폴백)
+  function findMemoryList(dialog) {
+    return getScrollContainer(dialog)
+      || dialog.querySelector('[data-virtuoso-scroller], [data-test-id="virtuoso-scroller"]')
+      || null;
+  }
+
+  // 검색창 삽입 위치: '총 N개 / 최신순' 헤더 행 바로 아래 (목록 컨테이너 유무와 무관)
+  function getMemorySearchAnchor(dialog) {
+    const cnt = dialog.querySelector('span.text-gray-2');
+    const row = cnt && (cnt.closest('div.justify-between') || cnt.closest('div.h-7'));
+    if (row && row.parentElement) return { el: row, pos: 'afterend' };
+    const sc = findMemoryList(dialog);
+    if (sc) return { el: sc, pos: 'beforebegin' };
+    return null;
+  }
+
   function applyMemorySearch(dialog, kw) {
-    const sc = getScrollContainer(dialog);
+    const sc = findMemoryList(dialog);
     if (!sc) return;
     for (const item of sc.children) {
       if (!(item instanceof Element)) continue;
@@ -1749,8 +1766,8 @@
     const SEARCH_ID = 'crk-mem-search';
     if (dialog.querySelector(`#${SEARCH_ID}`)) return;   // 이미 주입됨
 
-    const sc = getScrollContainer(dialog);
-    if (!sc) return;
+    const anchor = getMemorySearchAnchor(dialog);
+    if (!anchor) return;                                  // 다음 MutationObserver 틱에서 재시도
 
     const wrap = document.createElement('div');
     wrap.id = SEARCH_ID;
@@ -1781,15 +1798,18 @@
     });
 
     wrap.appendChild(inp);
-    sc.insertAdjacentElement('beforebegin', wrap);
+    anchor.el.insertAdjacentElement(anchor.pos, wrap);
 
     // 탭 전환 시 재검색 적용 (pills 버튼 클릭 → 600ms 후 DOM 안정화 → 재필터)
+    // 재주입되어도 리스너가 중복되지 않도록 tabRow 플래그 + 현재 입력창을 id로 재조회
     const tabRow = dialog.querySelector('div.flex.space-x-2.px-6.pb-5');
-    if (tabRow) {
+    if (tabRow && !tabRow.hasAttribute('data-crk-mem-search-tabs')) {
+      tabRow.setAttribute('data-crk-mem-search-tabs', '1');
       tabRow.querySelectorAll('button').forEach(btn => {
         btn.addEventListener('click', () => {
           setTimeout(async () => {
-            const kw = inp.value.trim().toLowerCase();
+            const cur = dialog.querySelector(`#${SEARCH_ID} input`);
+            const kw  = cur ? cur.value.trim().toLowerCase() : '';
             if (!kw) return;
             await ensureAllLoaded(dialog, null);
             applyMemorySearch(dialog, kw);
@@ -1801,7 +1821,9 @@
 
   function injectMemoryButtons(dialog) {
     const row = getFooterRow(dialog);
-    if (!row || row.hasAttribute(MB_ATTR)) return;
+    if (!row) return;
+    injectMemorySearch(dialog);              // 멱등 – 목록 렌더 지연/재마운트 시 매 틱 재시도
+    if (row.hasAttribute(MB_ATTR)) return;
     row.setAttribute(MB_ATTR, '1');
     const regenBtn = createMemBtn(MB_REGEN, '재생성', '#059669');
     regenBtn.title = 'Gemini로 메모리 슬롯 재생성 후 저장 (세션 이주 모달에서 API 키 설정 필요)';
@@ -1830,7 +1852,6 @@
     row.insertBefore(saveBtn,  loadBtn);
     row.insertBefore(regenBtn, saveBtn);
     injectRegenTab(dialog);
-    injectMemorySearch(dialog);
   }
 
   //  플로팅 버튼 상태 동기화
