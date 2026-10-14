@@ -195,7 +195,7 @@
                 opt.style.height = 'auto';
 
                 // 키워드에 따라 위치할 열(Column)과 행(Row)을 강제 지정합니다.
-                if (text.includes('페이블') || text.includes('하이퍼')) {
+                if (text.includes('페이블') || text.includes('하이퍼') || text.includes('울트라')) {
                     opt.style.gridColumn = '1';
                     opt.style.gridRow = highEndRow++;
                 } else if (text.includes('슈퍼') || text.includes('프로')) {
