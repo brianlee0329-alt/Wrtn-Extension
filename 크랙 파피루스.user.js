@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         크랙 파피루스
-// @version      2.0.1
+// @version      2.0.2
 // @description  유저노트 프리셋 저장/불러오기 + 대화 프로필 폴더/접힘 관리 + 페르소나 이식
 // @match        https://crack.wrtn.ai/*
 // @require      https://cdn.jsdelivr.net/npm/dexie@4.2.1/dist/dexie.min.js#sha256-STeEejq7AcFOvsszbzgCDL82AjypbLLjD5O6tUByfuA=
@@ -326,6 +326,28 @@ GM_addStyle(`
     padding: 6px 10px; border-radius: 6px;
     background: rgba(0,0,0,0.03); line-height: 1.5;
   }
+
+  /* 목록에 없는 프로필 (이름·내용 앞부분 변경 등으로 남은 옛 정보) */
+  .crk-mgr-stale-bar {
+    display: flex; flex-direction: column; gap: 6px; flex-shrink: 0;
+    padding: 8px 10px; border-radius: 8px; background: rgba(239,68,68,0.06);
+  }
+  .crk-mgr-stale-bar-row { display: flex; align-items: center; gap: 8px; }
+  .crk-mgr-stale-text {
+    flex: 1; font-size: 12px; color: var(--text_secondary, #666);
+  }
+  .crk-mgr-stale-btn {
+    padding: 4px 10px; border: 1px solid rgba(239,68,68,0.5); border-radius: 6px;
+    background: transparent; color: #ef4444; font-size: 12px; font-family: inherit;
+    cursor: pointer; flex-shrink: 0; transition: background 0.1s, color 0.1s;
+  }
+  .crk-mgr-stale-btn:hover { background: rgba(239,68,68,0.1); }
+  .crk-mgr-stale-btn[data-confirm="1"] { background: #ef4444; color: #fff; }
+  .crk-mgr-profile-row[data-stale="1"] .crk-mgr-profile-name { opacity: 0.55; }
+  .crk-mgr-stale-badge {
+    font-size: 10px; padding: 1px 6px; border-radius: 4px; flex-shrink: 0;
+    color: #ef4444; background: rgba(239,68,68,0.1); white-space: nowrap;
+  }
 `);
 
 // ════════════════════════════════════════════════════════════════════
@@ -554,6 +576,11 @@ function _makeThrottle(fn, wait) {
 //  - setting 페이지 지원 제거 (findSettingPage, watchRadixPortals 등)
 //  - 기존 카드 드래그 핸들 → 관리 모달 내부로 이전
 //  - transplantPersonaRow 유지
+//
+//  2.0.2 변경사항:
+//  - 프로필 관리 탭: 현재 대화 프로필 목록에 없는 항목(이름·내용 앞 40자 변경 등으로
+//    남은 옛 폴더/순서/라벨 정보)을 감지해 표시 + 항목별 삭제 / 일괄 정리 (2단계 확인)
+//  - 자동 삭제는 하지 않음 (목록이 일부만 렌더링된 상태에서의 오삭제 방지)
 // ════════════════════════════════════════════════════════════════════
 (function () {
   'use strict';
@@ -679,6 +706,66 @@ function _makeThrottle(fn, wait) {
 
     if (changed) saveMeta(meta);
     return meta;
+  }
+
+  // ── 목록에 없는 프로필(옛 정보) 감지/삭제 ─────────────────────────────
+
+  /**
+   * 대화 프로필 모달에 현재 렌더링된 카드와 대조해, 어떤 카드와도 일치하지 않는
+   * 등록 항목(= 이름 또는 내용 앞 40자가 바뀌었거나 삭제된 프로필의 잔존 정보)을 찾는다.
+   * 식별 키는 ensureProfileTags 와 동일: 이름 + 내용 앞 40자.
+   *
+   * 판정 불가(모달 분리됨 / 카드 0개 = 로딩 중·선택자 불일치)이면 빈 결과를 돌려준다.
+   * 읽기 전용: meta 를 수정하지 않는다.
+   * @param {ReturnType<typeof defaultMeta>} meta
+   * @param {Element|null} chatModal
+   * @returns {{ stale: ReturnType<typeof defaultMeta>['profiles'], liveCount: number }}
+   */
+  function findStaleProfiles(meta, chatModal) {
+    if (!chatModal || !chatModal.isConnected) return { stale: [], liveCount: 0 };
+    const cards = getPersonaCards(chatModal);
+    if (!cards.length) return { stale: [], liveCount: 0 };
+
+    const key  = (/** @type {string} */ name, /** @type {string} */ prefix) => `${name}\u0000${prefix}`;
+    const live = new Set(cards.map(c => key(getCardName(c), getCardContentPrefix(c))));
+    return {
+      stale:     meta.profiles.filter(p => !live.has(key(p.name, p.contentPrefix))),
+      liveCount: cards.length,
+    };
+  }
+
+  /**
+   * 지정한 태그의 프로필 등록 정보(폴더·순서·라벨·고유태그)를 삭제한다.
+   *  - 태그는 nextTagIdx 로 단조 증가 발급되므로 usedTags/nextTagIdx 는 건드리지 않는다(재사용 방지).
+   *  - 영향받은 폴더만 folderOrder 를 0..n-1 로 재정렬한다
+   *    (다른 코드가 "폴더 내 개수 = 다음 order" 규약을 쓰므로 틈/중복을 남기지 않기 위함).
+   *  - 모달이 열려 있으면 카드를 다시 대조한다: ensureProfileTags 가 모든 카드의 data-crk-tag 를
+   *    재지정하므로, 옛 태그를 들고 있던 카드(React 요소 재사용)는 새 항목으로 재등록된다.
+   *    이어서 라벨 배지·폴더 순서 표시를 갱신한다.
+   * @param {string[]} tags
+   * @param {Element|null} chatModal
+   * @returns {ReturnType<typeof defaultMeta>} 삭제 반영 후 meta
+   */
+  function removeProfilesByTag(tags, chatModal) {
+    const drop    = new Set(tags);
+    const meta    = loadMeta();
+    const touched = new Set(meta.profiles.filter(p => drop.has(p.tag)).map(p => p.folderId));
+
+    meta.profiles = meta.profiles.filter(p => !drop.has(p.tag));
+    for (const fid of touched) {
+      meta.profiles
+        .filter(p => p.folderId === fid)
+        .sort((a, b) => (a.folderOrder ?? 0) - (b.folderOrder ?? 0))
+        .forEach((p, i) => { p.folderOrder = i; });
+    }
+    saveMeta(meta);
+
+    if (!chatModal || !chatModal.isConnected) return meta;
+
+    const fresh = ensureProfileTags(chatModal);
+    transformCards(chatModal);
+    applyFolderView(chatModal, fresh);
+    return fresh;
   }
 
   // ── 카드 변환 (접힘/펼침 버튼 주입) ─────────────────────────────────
@@ -1194,6 +1281,41 @@ function _makeThrottle(fn, wait) {
 
   function fillProfileList(container, meta, filterFolderId, chatModal) {
     container.innerHTML = '';
+
+    // ── 목록에 없는 항목 감지 (렌더링마다 현재 대화 프로필 카드와 재대조) ──
+    // 일괄 정리 범위 = 지금 목록에 보이는 '목록에 없음' 항목 (보이는 것만 삭제)
+    const { stale, liveCount } = findStaleProfiles(meta, chatModal);
+    const staleTags    = new Set(stale.map(p => p.tag));
+    const visibleStale = stale.filter(p => filterFolderId === '__all__' || p.folderId === filterFolderId);
+
+    if (visibleStale.length) {
+      const bar    = document.createElement('div'); bar.className = 'crk-mgr-stale-bar';
+      const barRow = document.createElement('div'); barRow.className = 'crk-mgr-stale-bar-row';
+      const barTxt = document.createElement('span'); barTxt.className = 'crk-mgr-stale-text';
+      barTxt.textContent = `목록에 없는 항목 ${visibleStale.length}개 (이름·내용 앞부분 변경 등)`;
+
+      const cleanBtn = document.createElement('button'); cleanBtn.className = 'crk-mgr-stale-btn';
+      cleanBtn.textContent = '모두 정리'; cleanBtn.title = '목록에 없음 표시된 항목의 폴더·순서·라벨 정보를 삭제';
+      cleanBtn.addEventListener('click', () => {
+        if (cleanBtn.dataset.confirm === '1') {
+          const newMeta = removeProfilesByTag(visibleStale.map(p => p.tag), chatModal);
+          fillProfileList(container, newMeta, filterFolderId, chatModal);
+        } else {
+          cleanBtn.dataset.confirm = '1'; cleanBtn.textContent = `정말 ${visibleStale.length}개 삭제?`;
+          setTimeout(() => { delete cleanBtn.dataset.confirm; cleanBtn.textContent = '모두 정리'; }, 3000);
+        }
+      });
+      barRow.appendChild(barTxt); barRow.appendChild(cleanBtn); bar.appendChild(barRow);
+
+      // 삭제 대상이 현재 프로필 수 이상 = 목록을 제대로 읽지 못했을 가능성 (선택자 변경·부분 렌더링)
+      if (stale.length >= Math.max(3, liveCount)) {
+        const warn = document.createElement('div'); warn.className = 'crk-mgr-warning';
+        warn.textContent = '삭제 대상이 현재 프로필 수 이상입니다. 목록을 제대로 읽지 못했을 수 있으니 아래 이름을 확인한 뒤 정리하세요.';
+        bar.appendChild(warn);
+      }
+      container.appendChild(bar);
+    }
+
     let profiles = filterFolderId === '__all__'
       ? [...meta.profiles]
       : meta.profiles.filter(p => p.folderId === filterFolderId);
@@ -1288,7 +1410,33 @@ function _makeThrottle(fn, wait) {
       mainRow.appendChild(handle);
       mainRow.appendChild(nameSpan);
       mainRow.appendChild(tagBadge);
+
+      // 목록에 없는 항목: 배지 + 항목별 삭제 (폴더 삭제와 동일한 2단계 확인)
+      const isStale = staleTags.has(profile.tag);
+      if (isStale) {
+        wrapper.dataset.stale = '1';
+        const staleBadge = document.createElement('span');
+        staleBadge.className = 'crk-mgr-stale-badge'; staleBadge.textContent = '목록에 없음';
+        mainRow.appendChild(staleBadge);
+      }
+
       mainRow.appendChild(folderSel);
+
+      if (isStale) {
+        const rmBtn = document.createElement('button');
+        rmBtn.className = 'crk-mgr-icon-btn danger'; rmBtn.textContent = '×';
+        rmBtn.title = '이 항목 삭제 (폴더·순서·라벨 정보)';
+        rmBtn.addEventListener('click', () => {
+          if (rmBtn.dataset.confirm === '1') {
+            const newMeta = removeProfilesByTag([profile.tag], chatModal);
+            fillProfileList(container, newMeta, filterFolderId, chatModal);
+          } else {
+            rmBtn.dataset.confirm = '1'; rmBtn.textContent = '!'; rmBtn.style.color = '#ef4444';
+            setTimeout(() => { delete rmBtn.dataset.confirm; rmBtn.textContent = '×'; rmBtn.style.color = ''; }, 3000);
+          }
+        });
+        mainRow.appendChild(rmBtn);
+      }
       wrapper.appendChild(mainRow);
 
       // ── 하단 행: 수동 라벨 편집 ──
