@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Crack 레이아웃 조절기
 // @namespace    https://github.com/local/crack-layout
-// @version      1.6.2
+// @version      1.6.3
 // @description  채팅창 너비 조절 + 컴팩트 모드
 // @match        https://crack.wrtn.ai/stories/*
 // @grant        GM_setValue
@@ -228,10 +228,12 @@
 
                 const applyExpandState = () => {
                     if (CFG.modelModalExpanded) {
-                        content.style.height = 'var(--radix-popper-available-height, 90vh)';
+                        content.style.height = '75dvh';
+                        content.style.maxHeight = '75dvh';
                         expandBtn.style.transform = 'rotate(180deg)';
                     } else {
                         content.style.height = ''; // 비워서 플랫폼 기본 h-[min(569px,...)] 클래스로 복귀
+                        content.style.maxheight = '';
                         expandBtn.style.transform = 'rotate(0deg)';
                     }
                 };
@@ -377,6 +379,19 @@
                 width: 1.5rem !important;
                 height: 1.5rem !important;
             }
+
+            /* ── 모델 선택 아이콘 크기 고정 ── */
+            html body div img[src*="model-icon/"] {
+                width: 16px !important;
+                height: 16px !important;
+                min-width: 16px !important;
+                min-height: 16px !important;
+                max-width: 16px !important;
+                max-height: 16px !important;
+                flex: 0 0 16px !important;
+                object-fit: contain !important;
+            }
+
 
             /* ── 컴팩트 모드: 그룹 BFC float ── */
             .ck-group {
