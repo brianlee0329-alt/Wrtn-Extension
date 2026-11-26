@@ -6,6 +6,8 @@
 // @match        https://crack.wrtn.ai/stories/*
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_addElement
+// @grant        unsafeWindow
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -13,100 +15,161 @@
     'use strict';
 
     // =========================================================================
-    //  ① 스크롤 차단 — 조기 실행 구역 (document-start 시점)
+    //  ① 스크롤 차단 — "홀드" 모델 (페이지 컨텍스트 주입)
     //
-    //  원본: 채팅 강제 스크롤 차단 v1.0.0
-    //  변경:
-    //    · setInterval(syncScroll, 6) → requestAnimationFrame 루프로 교체
-    //      이전 구조의 문제: 6ms 인터벌은 프레임 주기(~16ms)보다 짧아 메인 스레드에
-    //      매 프레임 2~3회 불필요한 콜백을 쌓았음.
-    //      rAF는 브라우저 렌더 파이프라인에 동기화되어 프레임당 정확히 1회만 실행되고,
-    //      탭 비활성 시 자동으로 throttle되어 GC 압력도 함께 해소됨.
-    //    · 락 활성 구간에서만 루프 실행 → 유휴 상태에서 rAF 프레임 소비 없음
-    //    · isStoryPage() → URL 패턴 캐싱으로 반복 호출 최적화
+    //  재설계 배경 (2026-11 실측):
+    //    · 플랫폼이 채팅 스크롤러 구조를 변경 — 스크롤러는 class="w-full h-full"
+    //      (overflow-y: scroll, 정방향 scrollTop 양수)이며 .overflow-y-auto /
+    //      .flex-col-reverse 클래스가 없음 → 기존 getChatScroller()가 항상 null
+    //    · 하단 정렬이 CSS 역방향에서 JS 추종(stick-to-bottom 계열)으로 이동.
+    //      전송 후 약 80ms에 하단으로 1회 즉시 쓰기, 이후 프레임마다 추종 쓰기가
+    //      반복되며 모두 Element.prototype.scrollTop setter를 통과함
+    //    · 사용자 스크롤(wheel/touch/스크롤바)은 JS 대입이 아니므로 setter를 거치지 않음
+    //      → setter 단에서 "프로그램 쓰기"만 선별 차단 가능
+    //
+    //  동작:
+    //    · 홀드 ON  : 사용자 입력으로 하단에서 T(px) 넘게 벗어남 (scroll 이벤트 기준)
+    //    · 홀드 OFF : 사용자 스크롤로 하단 T(px) 이내로 복귀
+    //    · 홀드 중   : 스크롤러에 대한 하향 scrollTop 쓰기를 폐기 (상향 쓰기는 통과)
+    //    · 프로그램 쓰기가 일으킨 scroll 이벤트는 홀드 판정에서 제외
+    //      (쓰기 직후 scrollTop이 쓴 값과 일치하는 이벤트)
+    //    · 기존 wheel/touch 리스너, rAF 복원 루프, 3초 타이머는 제거
+    //
+    //  실행 컨텍스트: 이 스크립트는 @grant 사용으로 샌드박스에서 실행되므로,
+    //    패치 코드를 페이지 월드에 주입해야 플랫폼 코드의 setter 호출에 닿음.
+    //    GM_addElement(CSP 우회) → <script> 직접 삽입 → unsafeWindow 순으로 시도.
+    //
+    //  진단: 콘솔에서 window.__ckHoldDebug = true 로 차단 로그 켜기,
+    //        window.__ckHoldState() 로 현재 홀드/하단 거리 확인
     // =========================================================================
 
-    let lastUserPos   = 0;
-    let isLocked      = false;
-    let clearTimer    = null;
-    let startY        = 0;
-    let rafHandle     = null;  // rAF 루프 핸들
+    function ckHoldInstaller(W) {
+        const D = W.document;
+        const root = D.documentElement;
+        if (root.getAttribute('data-ck-hold')) return;
 
-    const isStoryPage = () => window.location.pathname.startsWith('/stories/');
+        const T = 100; // 하단 판정 임계값 (CSS px)
+        const proto = W.Element.prototype;
+        const desc = Object.getOwnPropertyDescriptor(proto, 'scrollTop');
+        if (!desc || !desc.get || !desc.set) return;
 
-    // '진짜 채팅창'만 정밀 타겟팅
-    const getChatScroller = () => {
-        if (!isStoryPage()) return null;
-        const msgNode = document.querySelector('[data-message-group-id]');
-        if (msgNode) return msgNode.closest('.overflow-y-auto');
-        const flexScroller = document.querySelector('.overflow-y-auto.flex-col-reverse');
-        if (flexScroller) return flexScroller;
-        return null;
-    };
+        let scroller   = null;
+        let nextLookup = 0;
+        let hold       = false;
+        let lastProg   = null; // { v, t } — 통과시킨 프로그램 쓰기의 결과 위치/시각
 
-    // ── rAF 기반 스크롤 동기화 루프 ──────────────────────────────────────────
-    // 락이 활성화된 동안만 루프가 살아 있음.
-    // 락 해제(isLocked = false) 시 cancelAnimationFrame으로 즉시 종료.
-    function syncScrollFrame() {
-        if (!isLocked) {
-            rafHandle = null;
-            return; // 락 해제 → 루프 종료
+        const log = function () {
+            if (W.__ckHoldDebug) console.log.apply(console, ['[ck-hold]'].concat([].slice.call(arguments)));
+        };
+        const inStory = function () { return W.location.pathname.indexOf('/stories/') === 0; };
+        const distToBottom = function (el) { return el.scrollHeight - el.clientHeight - desc.get.call(el); };
+
+        // 메시지 요소에서 위로 올라가며 실제로 스크롤되는 첫 조상을 찾는다.
+        // 클래스가 아니라 data-message-group-id 와 계산 스타일에만 의존.
+        function findScroller() {
+            if (scroller && scroller.isConnected) return scroller;
+            if (scroller) { scroller = null; hold = false; lastProg = null; }
+            const now = Date.now();
+            if (now < nextLookup || !inStory()) return null;
+            nextLookup = now + 300;
+            let n = D.querySelector('[data-message-group-id]');
+            while (n && n !== D.body) {
+                const oy = W.getComputedStyle(n).overflowY;
+                if ((oy === 'auto' || oy === 'scroll') && n.scrollHeight > n.clientHeight) {
+                    scroller = n;
+                    break;
+                }
+                n = n.parentElement;
+            }
+            return scroller;
         }
-        const el = getChatScroller();
-        if (el && el.scrollTop !== lastUserPos) {
-            el.scrollTop = lastUserPos;
-        }
-        rafHandle = requestAnimationFrame(syncScrollFrame);
+
+        // ── 관문: scrollTop setter ──────────────────────────────────────────
+        Object.defineProperty(proto, 'scrollTop', {
+            configurable: true,
+            enumerable: desc.enumerable,
+            get: desc.get,
+            set: function (v) {
+                const s = (this === scroller && scroller.isConnected) ? scroller : findScroller();
+                const isChat = !!s && this === s;
+                if (isChat && hold) {
+                    const cur = desc.get.call(this);
+                    if (Number(v) > cur + 1) {
+                        log('차단', Math.round(cur), '->', Math.round(Number(v)));
+                        return;
+                    }
+                }
+                desc.set.call(this, v);
+                if (isChat) lastProg = { v: desc.get.call(this), t: performance.now() };
+            }
+        });
+
+        // ── 홀드 판정: 사용자 기원 scroll 이벤트만 반영 ───────────────────────
+        D.addEventListener('scroll', function (e) {
+            const s = findScroller();
+            if (!s || e.target !== s) return;
+            const top = desc.get.call(s);
+            if (lastProg && Math.abs(top - lastProg.v) < 1 && performance.now() - lastProg.t < 200) return;
+            const next = distToBottom(s) > T;
+            if (next !== hold) {
+                hold = next;
+                log('홀드', hold ? 'ON' : 'OFF', '하단까지', Math.round(distToBottom(s)), 'px');
+            }
+        }, true);
+
+        // ── 플랫폼의 "맨 아래로" 류 버튼: 사용자의 명시적 의도이므로 홀드 해제 (추정 셀렉터) ──
+        D.addEventListener('click', function (e) {
+            if (!hold) return;
+            const t = e.target;
+            if (t && t.closest && t.closest('div.absolute[class*="bottom-[145px]"] button')) {
+                hold = false;
+                log('홀드 OFF (맨 아래로 버튼)');
+            }
+        }, true);
+
+        // ── 포커스 이동에 의한 스크롤 차단 (홀드 중, 채팅 영역 내) ─────────────
+        const origFocus = W.HTMLElement.prototype.focus;
+        W.HTMLElement.prototype.focus = function (opt) {
+            const s = scroller;
+            if (hold && s && s.isConnected && s.contains(this)) {
+                const o = (opt && typeof opt === 'object') ? Object.assign({}, opt) : {};
+                o.preventScroll = true;
+                return origFocus.call(this, o);
+            }
+            return origFocus.apply(this, arguments);
+        };
+
+        W.__ckHoldState = function () {
+            const s = findScroller();
+            return { hold: hold, scroller: s, distToBottom: s ? Math.round(distToBottom(s)) : null };
+        };
+        root.setAttribute('data-ck-hold', '1');
     }
 
-    function startDefense() {
-        // 이미 rAF 루프가 살아 있으면 중복 시작 방지
-        if (!rafHandle) {
-            rafHandle = requestAnimationFrame(syncScrollFrame);
+    (function installHold() {
+        const flagged = () => !!document.documentElement.getAttribute('data-ck-hold');
+        const code = '(' + ckHoldInstaller.toString() + ')(window);';
+        try {
+            if (typeof GM_addElement === 'function') {
+                GM_addElement('script', { textContent: code });
+            } else {
+                const s = document.createElement('script');
+                s.textContent = code;
+                (document.head || document.documentElement).appendChild(s);
+                s.remove();
+            }
+        } catch (e) {
+            console.warn('[ck-hold] 페이지 주입 실패, unsafeWindow로 재시도', e);
         }
-
-        // 기존 clearTimer 갱신: 마지막 사용자 동작으로부터 3초 후 락 해제
-        if (clearTimer) clearTimeout(clearTimer);
-        clearTimer = setTimeout(() => {
-            isLocked  = false;
-            clearTimer = null;
-            // rAF 루프는 syncScrollFrame 내부에서 isLocked 체크 후 자체 종료
-        }, 3000);
-    }
-
-    const handleUserAction = (e, delta) => {
-        if (!isStoryPage()) return;
-        const el = getChatScroller();
-        if (!el) return;
-        if (!el.contains(e.target) && el !== e.target) return;
-
-        if (delta < 0 || Math.abs(el.scrollTop) > 20) {
-            isLocked    = true;
-            lastUserPos = el.scrollTop;
-            startDefense();
-        } else {
-            isLocked = false;
+        if (!flagged()) {
+            try {
+                ckHoldInstaller(typeof unsafeWindow !== 'undefined' ? unsafeWindow : window);
+            } catch (e) {
+                console.warn('[ck-hold] unsafeWindow 설치 실패', e);
+            }
         }
-    };
-
-    window.addEventListener('wheel', (e) => handleUserAction(e, e.deltaY),   { passive: true, capture: true });
-    window.addEventListener('touchstart', (e) => { startY = e.touches[0].pageY; }, { passive: true });
-    window.addEventListener('touchmove',  (e) => {
-        handleUserAction(e, startY - e.touches[0].pageY);
-    }, { passive: true, capture: true });
-
-    // 포커스 이동 시 강제 스크롤 차단 (채팅 영역 내에서만)
-    const originalFocus = HTMLElement.prototype.focus;
-    HTMLElement.prototype.focus = function (arg) {
-        const chatEl = getChatScroller();
-        if (isStoryPage() && isLocked && chatEl && chatEl.contains(this)) {
-            const options = (typeof arg === 'object') ? arg : {};
-            options.preventScroll = true;
-            originalFocus.call(this, options);
-        } else {
-            originalFocus.apply(this, arguments);
-        }
-    };
+        if (!flagged()) console.warn('[ck-hold] 설치 실패 — 스크롤 홀드가 동작하지 않음');
+    })();
 
     // 브라우저 자체 스크롤 자동 보정 비활성화
     const injectAntiScrollStyle = () => {
@@ -259,12 +322,6 @@
     // (스크립트 로드 시 단 1회만 생성/구독됨)
     const modelModalObserver = new MutationObserver(adjustModelModalLayout);
     modelModalObserver.observe(document.body, { childList: true, subtree: true });
-
-    // 채팅방을 벗어나면 방어막 즉시 해제
-    // ※ 원본의 500ms setInterval은 유지 (단순 플래그 토글, GC 부하 미미)
-    setInterval(() => {
-        if (!isStoryPage()) isLocked = false;
-    }, 500);
 
 
     // =========================================================================
